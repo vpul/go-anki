@@ -76,7 +76,6 @@ func (c *Collection) getDecksV18() (map[int64]goanki.Deck, error) {
 		}
 		d.Mtime = mtime
 		// Default values for regular deck
-		d.Dyn = 0
 		d.Conf = 1
 		d.Desc = ""
 		d.Bury = true
@@ -167,6 +166,10 @@ func (c *Collection) getModelsV18() (map[int64]goanki.Model, error) {
 				ORD:  ord,
 			})
 		}
+		if err := fieldRows.Err(); err != nil {
+			_ = fieldRows.Close()
+			continue
+		}
 		_ = fieldRows.Close()
 
 		// Query templates
@@ -191,6 +194,10 @@ func (c *Collection) getModelsV18() (map[int64]goanki.Model, error) {
 				QFmt: qfmt,
 				AFmt: afmt,
 			})
+		}
+		if err := tmplRows.Err(); err != nil {
+			_ = tmplRows.Close()
+			continue
 		}
 		_ = tmplRows.Close()
 
