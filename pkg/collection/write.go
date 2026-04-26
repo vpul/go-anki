@@ -383,7 +383,9 @@ func (c *Collection) AddNote(input goanki.NewNote) (int64, error) {
 // dayOffsetSinceCreation returns the number of days since the collection was created.
 func dayOffsetSinceCreation(c *Collection) int64 {
 	var crt int64
-	_ = c.db.QueryRow("SELECT crt FROM col").Scan(&crt)
+	if err := c.db.QueryRow("SELECT crt FROM col").Scan(&crt); err != nil {
+		log.Printf("warning: failed to query collection creation time: %v", err)
+	}
 	if crt == 0 {
 		return time.Now().Unix() / 86400
 	}
