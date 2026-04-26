@@ -53,22 +53,12 @@ const (
 	// hostKeyEndpoint is the authentication endpoint.
 	hostKeyEndpoint = "hostKey"
 
-	// DownloadEndpoint is the full download endpoint suffix.
-	DownloadEndpoint = "download"
+	// downloadEndpoint is the full download endpoint suffix.
+	downloadEndpoint = "download"
 
-	// UploadEndpoint is the full upload endpoint suffix.
-	UploadEndpoint = "upload"
+	// uploadEndpoint is the full upload endpoint suffix.
+	uploadEndpoint = "upload"
 )
-
-// SyncMeta holds metadata returned by the AnkiWeb sync handshake.
-// This mirrors goankitypes.SyncMeta but provides local convenience.
-type SyncMeta struct {
-	Modified int64 `json:"mod"`  // Server modification timestamp
-	SchemaMod int64 `json:"scm"` // Schema modification count
-	USN      int   `json:"usn"`  // Server update sequence number
-	MediaUSN int   `json:"musn"` // Media update sequence number
-	Timestamp int64 `json:"ts"`  // Server timestamp
-}
 
 // DownloadResult holds the result of a full download operation.
 type DownloadResult struct {
@@ -86,8 +76,8 @@ type DownloadResult struct {
 
 // Client is an AnkiWeb sync client.
 type Client struct {
-	config    goankitypes.SyncConfig
-	baseURL   string
+	config     goankitypes.SyncConfig
+	baseURL    string
 	httpClient *http.Client
 	sessionKey string
 }
@@ -121,10 +111,34 @@ func (c *Client) SetHTTPClient(client *http.Client) {
 	c.httpClient = client
 }
 
+// buildURL constructs a sync endpoint URL with the given path and query parameters.
+func (c *Client) buildURL(path string, query url.Values) (string, error) {
+	u, err := url.Parse(c.baseURL)
+	if err != nil {
+		return "", fmt.Errorf("parse base URL: %w", err)
+	}
+	if path != "" {
+		u = u.JoinPath(path)
+	}
+	if query != nil {
+		q := u.Query()
+		for k, vs := range query {
+			for _, v := range vs {
+				q.Set(k, v)
+			}
+		}
+		u.RawQuery = q.Encode()
+	}
+	return u.String(), nil
+}
+
 // Authenticate sends credentials to AnkiWeb and obtains a session key.
 // The session key is stored internally and used for subsequent requests.
 func (c *Client) Authenticate(ctx context.Context) error {
-	authURL := c.baseURL + hostKeyEndpoint
+	authURL, err := c.buildURL(hostKeyEndpoint, nil)
+	if err != nil {
+		return fmt.Errorf("build auth URL: %w", err)
+	}
 
 	data := url.Values{}
 	data.Set("u", c.config.Username)
@@ -169,12 +183,18 @@ func (c *Client) SessionKey() string {
 
 // Meta retrieves server metadata (modification timestamp and USN).
 // Requires prior authentication via Authenticate().
-func (c *Client) Meta(ctx context.Context) (*SyncMeta, error) {
+func (c *Client) Meta(ctx context.Context) (*goankitypes.SyncMeta, error) {
 	if c.sessionKey == "" {
 		return nil, fmt.Errorf("not authenticated; call Authenticate() first")
 	}
 
-	syncURL := c.baseURL + "?k=" + url.QueryEscape(c.sessionKey) + "&meta=1"
+	query := url.Values{}
+	query.Set("k", c.sessionKey)
+	query.Set("meta", "1")
+	syncURL, err := c.buildURL("", query)
+	if err != nil {
+		return nil, fmt.Errorf("build meta URL: %w", err)
+	}
 
 	body, err := json.Marshal(map[string]int{"v": SyncProtocolVersion})
 	if err != nil {
@@ -198,7 +218,7 @@ func (c *Client) Meta(ctx context.Context) (*SyncMeta, error) {
 		return nil, fmt.Errorf("meta request failed (status %d): %s", resp.StatusCode, string(respBody))
 	}
 
-	var meta SyncMeta
+	var meta goankitypes.SyncMeta
 	if err := json.NewDecoder(resp.Body).Decode(&meta); err != nil {
 		return nil, fmt.Errorf("decode meta response: %w", err)
 	}
@@ -228,7 +248,13 @@ func (c *Client) FullDownload(ctx context.Context, dbPath string, mediaDir strin
 
 	colpkgPath := filepath.Join(tmpDir, "download.colpkg")
 
-	syncURL := c.baseURL + "?k=" + url.QueryEscape(c.sessionKey) + "&download=1"
+	query := url.Values{}
+	query.Set("k", c.sessionKey)
+	query.Set(downloadEndpoint, "1")
+	syncURL, err := c.buildURL("", query)
+	if err != nil {
+		return nil, fmt.Errorf("build download URL: %w", err)
+	}
 
 	body, err := json.Marshal(map[string]int{"v": SyncProtocolVersion})
 	if err != nil {
@@ -299,7 +325,6 @@ func (c *Client) FullDownload(ctx context.Context, dbPath string, mediaDir strin
 	// Move media files from extraction dir to the specified mediaDir
 	extractedMedia := filepath.Join(filepath.Dir(dbPath), "collection.media")
 	if extractedMedia != mediaDir {
-		// Copy media files to the target media directory
 		mediaFiles, err := os.ReadDir(extractedMedia)
 		if err == nil {
 			for _, f := range mediaFiles {
@@ -308,11 +333,9 @@ func (c *Client) FullDownload(ctx context.Context, dbPath string, mediaDir strin
 				}
 				src := filepath.Join(extractedMedia, f.Name())
 				dst := filepath.Join(mediaDir, f.Name())
-				data, err := os.ReadFile(src)
-				if err != nil {
-					continue
+				if err := copyFile(dst, src); err != nil {
+					return nil, fmt.Errorf("copy media file %s: %w", f.Name(), err)
 				}
-				_ = os.WriteFile(dst, data, 0644)
 			}
 		}
 	}
@@ -326,9 +349,22 @@ func (c *Client) FullDownload(ctx context.Context, dbPath string, mediaDir strin
 	}, nil
 }
 
+// copyFile copies a file from src to dst.
+func copyFile(dst, src string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return fmt.Errorf("read source file: %w", err)
+	}
+	if err := os.WriteFile(dst, data, 0644); err != nil {
+		return fmt.Errorf("write destination file: %w", err)
+	}
+	return nil
+}
+
 // FullUpload uploads the full collection to AnkiWeb.
 // It creates a .colpkg from the local collection database and media directory,
-// then uploads it to AnkiWeb.
+// then uploads it to AnkiWeb. The file is streamed from disk using io.Pipe
+// to avoid loading the entire .colpkg into memory.
 //
 // Parameters:
 //   - ctx: context for cancellation
@@ -361,33 +397,45 @@ func (c *Client) FullUpload(ctx context.Context, dbPath string, mediaDir string)
 		return fmt.Errorf("export colpkg: %w", err)
 	}
 
-	// Read the .colpkg file
-	colpkgData, err := os.ReadFile(colpkgPath)
+	// Build the upload URL
+	query := url.Values{}
+	query.Set("k", c.sessionKey)
+	query.Set(uploadEndpoint, "1")
+	syncURL, err := c.buildURL("", query)
 	if err != nil {
-		return fmt.Errorf("read colpkg file: %w", err)
+		return fmt.Errorf("build upload URL: %w", err)
 	}
 
-	// Upload via multipart form
-	syncURL := c.baseURL + "?k=" + url.QueryEscape(c.sessionKey) + "&upload=1"
-
-	// Build multipart form
-	var formBuf bytes.Buffer
-	formWriter := multipart.NewWriter(&formBuf)
-
-	// Add the colpkg file
-	fileWriter, err := formWriter.CreateFormFile("file", filepath.Base(colpkgPath))
+	// Open the colpkg file for streaming upload
+	colpkgFile, err := os.Open(colpkgPath)
 	if err != nil {
-		return fmt.Errorf("create form file field: %w", err)
+		return fmt.Errorf("open colpkg file: %w", err)
 	}
-	if _, err := fileWriter.Write(colpkgData); err != nil {
-		return fmt.Errorf("write colpkg to form: %w", err)
-	}
+	defer func() { _ = colpkgFile.Close() }()
 
-	if err := formWriter.Close(); err != nil {
-		return fmt.Errorf("close form writer: %w", err)
-	}
+	// Stream the multipart form using a pipe to avoid reading the entire file into memory
+	pr, pw := io.Pipe()
+	formWriter := multipart.NewWriter(pw)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, syncURL, &formBuf)
+	go func() {
+		defer pw.Close()
+
+		part, err := formWriter.CreateFormFile("file", filepath.Base(colpkgPath))
+		if err != nil {
+			pw.CloseWithError(fmt.Errorf("create form file field: %w", err))
+			return
+		}
+		if _, err := io.Copy(part, colpkgFile); err != nil {
+			pw.CloseWithError(fmt.Errorf("copy colpkg to form: %w", err))
+			return
+		}
+		if err := formWriter.Close(); err != nil {
+			pw.CloseWithError(fmt.Errorf("close form writer: %w", err))
+			return
+		}
+	}()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, syncURL, pr)
 	if err != nil {
 		return fmt.Errorf("create upload request: %w", err)
 	}

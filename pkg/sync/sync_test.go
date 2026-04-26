@@ -1,12 +1,20 @@
 package sync
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
 	"testing"
 
 	goankitypes "github.com/vpul/go-anki/pkg/types"
+	"github.com/klauspost/compress/zstd"
 )
 
 func TestNewClient(t *testing.T) {
@@ -240,5 +248,475 @@ func TestSyncURLWithTrailingSlash(t *testing.T) {
 
 	if err := client.Authenticate(context.Background()); err != nil {
 		t.Fatalf("Authenticate: %v", err)
+	}
+}
+
+// compressZstdTest compresses data using zstd for test fixtures.
+func compressZstdTest(t *testing.T, data []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	writer, err := zstd.NewWriter(&buf)
+	if err != nil {
+		t.Fatalf("create zstd writer: %v", err)
+	}
+	if _, err := writer.Write(data); err != nil {
+		t.Fatalf("write zstd data: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close zstd writer: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// createTestColpkg creates a minimal .colpkg file for testing.
+func createTestColpkg(t *testing.T, withMedia bool) []byte {
+	t.Helper()
+
+	buf := &bytes.Buffer{}
+	zipWriter := zip.NewWriter(buf)
+
+	// Create a minimal SQLite database placeholder
+	dbData := append([]byte("SQLite format 3\x00"), make([]byte, 100)...)
+
+	// Compress with zstd
+	compressed := compressZstdTest(t, dbData)
+
+	f, err := zipWriter.Create("collection.anki21b")
+	if err != nil {
+		t.Fatalf("create anki21b entry: %v", err)
+	}
+	if _, err := f.Write(compressed); err != nil {
+		t.Fatalf("write anki21b entry: %v", err)
+	}
+
+	// Add placeholder
+	f, err = zipWriter.Create("collection.anki2")
+	if err != nil {
+		t.Fatalf("create anki2 entry: %v", err)
+	}
+	if _, err := f.Write([]byte("")); err != nil {
+		t.Fatalf("write anki2 entry: %v", err)
+	}
+
+	if withMedia {
+		// Add media map
+		mediaMap := map[string]string{"0": "test.png"}
+		mediaMapData, _ := json.Marshal(mediaMap)
+		f, err = zipWriter.Create("media")
+		if err != nil {
+			t.Fatalf("create media entry: %v", err)
+		}
+		if _, err := f.Write(mediaMapData); err != nil {
+			t.Fatalf("write media entry: %v", err)
+		}
+
+		// Add media file
+		f, err = zipWriter.Create("0")
+		if err != nil {
+			t.Fatalf("create media file entry: %v", err)
+		}
+		if _, err := f.Write([]byte("fake-png-data")); err != nil {
+			t.Fatalf("write media file entry: %v", err)
+		}
+	} else {
+		// Add empty media map
+		mediaMap := map[string]string{}
+		mediaMapData, _ := json.Marshal(mediaMap)
+		f, err = zipWriter.Create("media")
+		if err != nil {
+			t.Fatalf("create media entry: %v", err)
+		}
+		if _, err := f.Write(mediaMapData); err != nil {
+			t.Fatalf("write media entry: %v", err)
+		}
+	}
+
+	if err := zipWriter.Close(); err != nil {
+		t.Fatalf("close zip: %v", err)
+	}
+
+	return buf.Bytes()
+}
+
+func TestFullDownloadSuccess(t *testing.T) {
+	colpkgData := createTestColpkg(t, false)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sync/hostKey":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"key":"download-test-key"}`))
+		default:
+			// Verify download query parameter
+			if r.URL.Query().Get("download") != "1" {
+				t.Errorf("expected download=1 query parameter, got %v", r.URL.Query())
+			}
+			if r.URL.Query().Get("k") == "" {
+				t.Error("expected session key in query parameters")
+			}
+			// Verify request body contains protocol version
+			body, _ := io.ReadAll(r.Body)
+			var reqBody map[string]int
+			if err := json.Unmarshal(body, &reqBody); err != nil {
+				t.Errorf("failed to parse request body: %v", err)
+			} else if reqBody["v"] != SyncProtocolVersion {
+				t.Errorf("expected v=%d, got %d", SyncProtocolVersion, reqBody["v"])
+			}
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("X-Database-Modification-Timestamp", "1700000000")
+			w.Header().Set("X-Database-Update-Sequence-Number", "42")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(colpkgData)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClientWithURL(goankitypes.SyncConfig{
+		Username: "test@example.com",
+		Password: "secret",
+	}, server.URL+"/sync/")
+
+	if err := client.Authenticate(context.Background()); err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "collection.anki2")
+	mediaDir := filepath.Join(tmpDir, "collection.media")
+
+	result, err := client.FullDownload(context.Background(), dbPath, mediaDir)
+	if err != nil {
+		t.Fatalf("FullDownload: %v", err)
+	}
+
+	// Verify header parsing
+	if result.ModifiedTimestamp != 1700000000 {
+		t.Errorf("expected ModifiedTimestamp=1700000000, got %d", result.ModifiedTimestamp)
+	}
+	if result.UpdateSequenceNumber != 42 {
+		t.Errorf("expected UpdateSequenceNumber=42, got %d", result.UpdateSequenceNumber)
+	}
+
+	// Verify the database file exists (ImportColpkg extracts collection.anki2)
+	if _, err := os.Stat(result.DBPath); os.IsNotExist(err) {
+		t.Errorf("database file does not exist at %s", result.DBPath)
+	}
+
+	// Verify the media directory exists
+	if _, err := os.Stat(result.MediaDir); os.IsNotExist(err) {
+		t.Errorf("media directory does not exist at %s", result.MediaDir)
+	}
+}
+
+func TestFullDownloadMediaRelocation(t *testing.T) {
+	colpkgData := createTestColpkg(t, true)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sync/hostKey":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"key":"media-test-key"}`))
+		default:
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("X-Database-Modification-Timestamp", "1700001000")
+			w.Header().Set("X-Database-Update-Sequence-Number", "55")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(colpkgData)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClientWithURL(goankitypes.SyncConfig{
+		Username: "test@example.com",
+		Password: "secret",
+	}, server.URL+"/sync/")
+
+	if err := client.Authenticate(context.Background()); err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "collection.anki2")
+	customMediaDir := filepath.Join(tmpDir, "custom_media")
+
+	result, err := client.FullDownload(context.Background(), dbPath, customMediaDir)
+	if err != nil {
+		t.Fatalf("FullDownload: %v", err)
+	}
+
+	// Verify media files were relocated
+	if result.MediaFilesImported != 1 {
+		t.Errorf("expected 1 media file imported, got %d", result.MediaFilesImported)
+	}
+
+	// Verify the media file exists in the custom media dir
+	mediaFile := filepath.Join(customMediaDir, "test.png")
+	if _, err := os.Stat(mediaFile); os.IsNotExist(err) {
+		t.Errorf("media file does not exist at %s", mediaFile)
+	}
+
+	// Verify the database was saved to the specified path
+	if result.DBPath != dbPath {
+		t.Errorf("expected DBPath=%q, got %q", dbPath, result.DBPath)
+	}
+
+	// Verify header parsing
+	if result.ModifiedTimestamp != 1700001000 {
+		t.Errorf("expected ModifiedTimestamp=1700001000, got %d", result.ModifiedTimestamp)
+	}
+	if result.UpdateSequenceNumber != 55 {
+		t.Errorf("expected UpdateSequenceNumber=55, got %d", result.UpdateSequenceNumber)
+	}
+}
+
+func TestFullDownloadServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sync/hostKey":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"key":"error-test-key"}`))
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("internal server error"))
+		}
+	}))
+	defer server.Close()
+
+	client := NewClientWithURL(goankitypes.SyncConfig{
+		Username: "test@example.com",
+		Password: "secret",
+	}, server.URL+"/sync/")
+
+	if err := client.Authenticate(context.Background()); err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	_, err := client.FullDownload(context.Background(), filepath.Join(tmpDir, "test.anki2"), filepath.Join(tmpDir, "media"))
+	if err == nil {
+		t.Fatal("expected error for server error response")
+	}
+}
+
+func TestFullUploadSuccess(t *testing.T) {
+	tmpDir := t.TempDir()
+	sourceDB := filepath.Join(tmpDir, "collection.anki2")
+	mediaDir := filepath.Join(tmpDir, "media")
+
+	// Create a minimal SQLite-like file for the upload
+	if err := os.WriteFile(sourceDB, []byte("SQLite format 3\x00"+string(make([]byte, 100))), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create media directory with a test file
+	if err := os.MkdirAll(mediaDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mediaDir, "test.png"), []byte("fake-png-data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sync/hostKey":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"key":"upload-test-key"}`))
+		default:
+			// Verify upload query parameter
+			if r.URL.Query().Get("upload") != "1" {
+				t.Errorf("expected upload=1 query parameter, got %v", r.URL.Query())
+			}
+			if r.URL.Query().Get("k") == "" {
+				t.Error("expected session key in query parameters")
+			}
+			// Verify multipart form data
+			contentType := r.Header.Get("Content-Type")
+			if contentType == "" {
+				t.Error("missing Content-Type header")
+			}
+			// Read the body to ensure it's valid
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read body: %v", err)
+			}
+			if len(body) == 0 {
+				t.Error("upload body is empty")
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(""))
+		}
+	}))
+	defer server.Close()
+
+	client := NewClientWithURL(goankitypes.SyncConfig{
+		Username: "test@example.com",
+		Password: "secret",
+	}, server.URL+"/sync/")
+
+	if err := client.Authenticate(context.Background()); err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+
+	err := client.FullUpload(context.Background(), sourceDB, mediaDir)
+	if err != nil {
+		t.Fatalf("FullUpload: %v", err)
+	}
+}
+
+func TestFullUploadWithEmptyMediaDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	sourceDB := filepath.Join(tmpDir, "collection.anki2")
+
+	// Create a minimal SQLite-like file for the upload
+	if err := os.WriteFile(sourceDB, []byte("SQLite format 3\x00"+string(make([]byte, 100))), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sync/hostKey":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"key":"upload-nomedia-key"}`))
+		default:
+			// Accept the upload
+			_, _ = io.ReadAll(r.Body)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(""))
+		}
+	}))
+	defer server.Close()
+
+	client := NewClientWithURL(goankitypes.SyncConfig{
+		Username: "test@example.com",
+		Password: "secret",
+	}, server.URL+"/sync/")
+
+	if err := client.Authenticate(context.Background()); err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+
+	err := client.FullUpload(context.Background(), sourceDB, "")
+	if err != nil {
+		t.Fatalf("FullUpload without media: %v", err)
+	}
+}
+
+func TestFullUploadServerError(t *testing.T) {
+	tmpDir := t.TempDir()
+	sourceDB := filepath.Join(tmpDir, "collection.anki2")
+
+	// Create a minimal file
+	if err := os.WriteFile(sourceDB, []byte("SQLite format 3\x00"+string(make([]byte, 100))), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sync/hostKey":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"key":"upload-error-key"}`))
+		default:
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte("forbidden"))
+		}
+	}))
+	defer server.Close()
+
+	client := NewClientWithURL(goankitypes.SyncConfig{
+		Username: "test@example.com",
+		Password: "secret",
+	}, server.URL+"/sync/")
+
+	if err := client.Authenticate(context.Background()); err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+
+	err := client.FullUpload(context.Background(), sourceDB, "")
+	if err == nil {
+		t.Fatal("expected error for server error response")
+	}
+}
+
+func TestBuildURL(t *testing.T) {
+	client := &Client{baseURL: "https://sync.ankiweb.net/sync/"}
+
+	// Test with path only
+	u, err := client.buildURL(hostKeyEndpoint, nil)
+	if err != nil {
+		t.Fatalf("buildURL: %v", err)
+	}
+	if u != "https://sync.ankiweb.net/sync/hostKey" {
+		t.Errorf("expected https://sync.ankiweb.net/sync/hostKey, got %s", u)
+	}
+
+	// Test with query parameters only
+	query := url.Values{}
+	query.Set("k", "testkey")
+	query.Set("meta", "1")
+	u, err = client.buildURL("", query)
+	if err != nil {
+		t.Fatalf("buildURL: %v", err)
+	}
+	if u != "https://sync.ankiweb.net/sync/?k=testkey&meta=1" {
+		t.Errorf("unexpected URL: %s", u)
+	}
+
+	// Test with both path and query
+	query = url.Values{}
+	query.Set("k", "testkey")
+	u, err = client.buildURL(hostKeyEndpoint, query)
+	if err != nil {
+		t.Fatalf("buildURL: %v", err)
+	}
+	if u != "https://sync.ankiweb.net/sync/hostKey?k=testkey" {
+		t.Errorf("unexpected URL: %s", u)
+	}
+}
+
+func TestCopyFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "source.txt")
+	dst := filepath.Join(tmpDir, "dest.txt")
+
+	content := []byte("test content for copy")
+	if err := os.WriteFile(src, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := copyFile(dst, src); err != nil {
+		t.Fatalf("copyFile: %v", err)
+	}
+
+	result, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read dest: %v", err)
+	}
+	if !bytes.Equal(result, content) {
+		t.Errorf("expected %q, got %q", content, result)
+	}
+}
+
+func TestCopyFileErrors(t *testing.T) {
+	// Test missing source file
+	err := copyFile("/nonexistent/dest.txt", "/nonexistent/source.txt")
+	if err == nil {
+		t.Error("expected error for missing source file")
+	}
+
+	// Test destination directory doesn't exist
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "source.txt")
+	if err := os.WriteFile(src, []byte("test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	err = copyFile("/nonexistent/path/dest.txt", src)
+	if err == nil {
+		t.Error("expected error for invalid destination path")
 	}
 }
