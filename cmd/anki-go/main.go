@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/vpul/go-anki/pkg/collection"
 	"github.com/vpul/go-anki/pkg/scheduler"
@@ -22,21 +23,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	var exitCode int
 	switch os.Args[1] {
 	case "due":
-		cmdDue()
+		exitCode = runCmd(runDue)
 	case "answer":
-		cmdAnswer()
+		exitCode = runCmd(runAnswer)
 	case "add-note":
-		cmdAddNote()
+		exitCode = runCmd(runAddNote)
 	case "create-deck":
-		cmdCreateDeck()
+		exitCode = runCmd(runCreateDeck)
 	case "stats":
-		cmdStats()
+		exitCode = runCmd(runStats)
 	case "sync":
 		cmdSync()
 	case "serve":
-		cmdServe()
+		exitCode = runCmd(runServe)
 	case "version":
 		fmt.Println("go-anki/1.0.0")
 	case "help", "--help", "-h":
@@ -44,8 +46,19 @@ func main() {
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
 		printUsage()
-		os.Exit(1)
+		exitCode = 1
 	}
+	os.Exit(exitCode)
+}
+
+// runCmd executes a function that returns an error, printing to stderr and
+// returning 1 on error. This ensures deferred Close() calls run before os.Exit.
+func runCmd(fn func() error) int {
+	if err := fn(); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 // printUsage displays help text for all available commands.
@@ -66,22 +79,20 @@ Use "anki-go <command> --help" for more information about a command.
 `)
 }
 
-// cmdDue lists cards that are due for review.
-func cmdDue() {
+// runDue lists cards that are due for review.
+func runDue() error {
 	fs := flag.NewFlagSet("due", flag.ExitOnError)
 	db := fs.String("db", "collection.anki2", "path to collection database")
 	deck := fs.String("deck", "", "filter by deck name")
 	limit := fs.Int("limit", 20, "maximum number of cards to show")
 	jsonOut := fs.Bool("json", false, "output as JSON")
 	if err := fs.Parse(os.Args[2:]); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("parse flags: %w", err)
 	}
 
 	col, err := collection.Open(*db, collection.ReadOnly)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: open collection: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("open collection: %w", err)
 	}
 	defer func() { _ = col.Close() }()
 
@@ -92,23 +103,18 @@ func cmdDue() {
 
 	cards, err := col.GetDueCards(filter)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: get due cards: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("get due cards: %w", err)
 	}
 
 	if *jsonOut {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		if err := enc.Encode(cards); err != nil {
-			fmt.Fprintf(os.Stderr, "error: encode JSON: %v\n", err)
-			os.Exit(1)
-		}
-		return
+		return enc.Encode(cards)
 	}
 
 	if len(cards) == 0 {
 		fmt.Println("No cards due.")
-		return
+		return nil
 	}
 
 	for _, c := range cards {
@@ -119,102 +125,87 @@ func cmdDue() {
 		fmt.Printf("Card %d [%s] Due: %d Reps: %d IVL: %d\n",
 			c.ID, deckName, c.Due, c.Reps, c.IVL)
 	}
+	return nil
 }
 
-// cmdAnswer processes a card answer with a rating.
-func cmdAnswer() {
+// runAnswer processes a card answer with a rating.
+func runAnswer() error {
 	fs := flag.NewFlagSet("answer", flag.ExitOnError)
 	db := fs.String("db", "collection.anki2", "path to collection database")
 	ratingStr := fs.String("rating", "", "rating: again, hard, good, or easy")
 	if err := fs.Parse(os.Args[2:]); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("parse flags: %w", err)
 	}
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "error: card ID is required")
-		fmt.Fprintln(os.Stderr, "Usage: anki-go answer <card-id> --rating=again|hard|good|easy [--db=path]")
-		os.Exit(1)
+		return fmt.Errorf("card ID is required; usage: anki-go answer <card-id> --rating=again|hard|good|easy [--db=path]")
 	}
 
 	cardID, err := strconv.ParseInt(fs.Arg(0), 10, 64)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: invalid card ID %q: %v\n", fs.Arg(0), err)
-		os.Exit(1)
+		return fmt.Errorf("invalid card ID %q: %w", fs.Arg(0), err)
 	}
 
 	switch *ratingStr {
 	case "again", "hard", "good", "easy":
 		// valid
 	default:
-		fmt.Fprintf(os.Stderr, "error: --rating must be one of: again, hard, good, easy (got %q)\n", *ratingStr)
-		os.Exit(1)
+		return fmt.Errorf("rating must be one of: again, hard, good, easy (got %q)", *ratingStr)
 	}
 
 	rating := goanki.ParseRating(*ratingStr)
 
 	col, err := collection.Open(*db, collection.ReadWrite)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: open collection: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("open collection: %w", err)
 	}
 	defer func() { _ = col.Close() }()
 
 	answer, err := col.AnswerCard(cardID, rating, scheduler.NewFSRSScheduler())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: answer card: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("answer card: %w", err)
 	}
 
 	fmt.Printf("Card %d answered with %s\n", answer.Card.ID, rating)
 	fmt.Printf("  Queue: %s  Due: %d  IVL: %d  Factor: %d  Reps: %d\n",
 		answer.Card.Queue, answer.Card.Due, answer.Card.IVL, answer.Card.Factor, answer.Card.Reps)
+	return nil
 }
 
-// cmdAddNote creates a new note in the collection.
-func cmdAddNote() {
+// runAddNote creates a new note in the collection.
+func runAddNote() error {
 	fs := flag.NewFlagSet("add-note", flag.ExitOnError)
 	db := fs.String("db", "collection.anki2", "path to collection database")
 	deckName := fs.String("deck", "", "deck name (required)")
 	modelName := fs.String("model", "", "note type/model name (required)")
-	fieldsRaw := fs.String("fields", "", "fields as Front:Back or Front\\x1fBack (required)")
+	fieldsRaw := fs.String("fields", "", "fields as comma-separated key=value pairs (e.g., Front=Hello,Back=World)")
 	tagsRaw := fs.String("tags", "", "comma-separated tags")
 	if err := fs.Parse(os.Args[2:]); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("parse flags: %w", err)
 	}
 
 	if *deckName == "" {
-		fmt.Fprintln(os.Stderr, "error: --deck is required")
-		os.Exit(1)
+		return fmt.Errorf("--deck is required")
 	}
 	if *modelName == "" {
-		fmt.Fprintln(os.Stderr, "error: --model is required")
-		os.Exit(1)
+		return fmt.Errorf("--model is required")
 	}
 	if *fieldsRaw == "" {
-		fmt.Fprintln(os.Stderr, "error: --fields is required")
-		os.Exit(1)
+		return fmt.Errorf("--fields is required")
 	}
 
-	// Parse fields: "Front:Back" or "Front\x1fBack"
-	var fields map[string]string
-	if strings.Contains(*fieldsRaw, ":") {
-		// Key-value format: "Front:text:Back:text2"
-		fields = make(map[string]string)
-		pairs := strings.Split(*fieldsRaw, "\x1f")
-		for _, pair := range pairs {
-			kv := strings.SplitN(pair, ":", 2)
-			if len(kv) == 2 {
-				fields[kv[0]] = kv[1]
-			} else {
-				fmt.Fprintf(os.Stderr, "error: invalid field pair %q (expected key:value)\n", pair)
-				os.Exit(1)
-			}
+	// Parse fields: comma-separated key=value pairs
+	fields := make(map[string]string)
+	pairs := strings.Split(*fieldsRaw, ",")
+	for _, pair := range pairs {
+		kv := strings.SplitN(pair, "=", 2)
+		if len(kv) != 2 {
+			return fmt.Errorf("invalid field %q (expected key=value)", pair)
 		}
-	} else {
-		fmt.Fprintln(os.Stderr, "error: --fields must be in key:value format (e.g., Front:text)")
-		os.Exit(1)
+		fields[strings.TrimSpace(kv[0])] = strings.TrimSpace(kv[1])
+	}
+	if len(fields) == 0 {
+		return fmt.Errorf("--fields must contain at least one key=value pair")
 	}
 
 	// Parse tags
@@ -235,83 +226,71 @@ func cmdAddNote() {
 
 	col, err := collection.Open(*db, collection.ReadWrite)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: open collection: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("open collection: %w", err)
 	}
 	defer func() { _ = col.Close() }()
 
 	noteID, err := col.AddNote(input)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: add note: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("add note: %w", err)
 	}
 
 	fmt.Println(noteID)
+	return nil
 }
 
-// cmdCreateDeck creates a new deck in the collection.
-func cmdCreateDeck() {
+// runCreateDeck creates a new deck in the collection.
+func runCreateDeck() error {
 	fs := flag.NewFlagSet("create-deck", flag.ExitOnError)
 	db := fs.String("db", "collection.anki2", "path to collection database")
 	if err := fs.Parse(os.Args[2:]); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("parse flags: %w", err)
 	}
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "error: deck name is required")
-		fmt.Fprintln(os.Stderr, "Usage: anki-go create-deck <name> [--db=path]")
-		os.Exit(1)
+		return fmt.Errorf("deck name is required; usage: anki-go create-deck <name> [--db=path]")
 	}
 	deckName := fs.Arg(0)
 
 	col, err := collection.Open(*db, collection.ReadWrite)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: open collection: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("open collection: %w", err)
 	}
 	defer func() { _ = col.Close() }()
 
 	deckID, err := col.CreateDeck(deckName)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: create deck: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("create deck: %w", err)
 	}
 
 	fmt.Println(deckID)
+	return nil
 }
 
-// cmdStats shows collection statistics.
-func cmdStats() {
+// runStats shows collection statistics.
+func runStats() error {
 	fs := flag.NewFlagSet("stats", flag.ExitOnError)
 	db := fs.String("db", "collection.anki2", "path to collection database")
 	jsonOut := fs.Bool("json", false, "output as JSON")
 	if err := fs.Parse(os.Args[2:]); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("parse flags: %w", err)
 	}
 
 	col, err := collection.Open(*db, collection.ReadOnly)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: open collection: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("open collection: %w", err)
 	}
 	defer func() { _ = col.Close() }()
 
 	stats, err := col.GetStats()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: get stats: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("get stats: %w", err)
 	}
 
 	if *jsonOut {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		if err := enc.Encode(stats); err != nil {
-			fmt.Fprintf(os.Stderr, "error: encode JSON: %v\n", err)
-			os.Exit(1)
-		}
-		return
+		return enc.Encode(stats)
 	}
 
 	fmt.Printf("total_cards=%d\n", stats.TotalCards)
@@ -323,6 +302,7 @@ func cmdStats() {
 	fmt.Printf("total_decks=%d\n", stats.TotalDecks)
 	fmt.Printf("total_models=%d\n", stats.TotalModels)
 	fmt.Printf("total_reviews=%d\n", stats.TotalReviews)
+	return nil
 }
 
 // cmdSync dispatches sync subcommands (download, upload).
@@ -334,9 +314,9 @@ func cmdSync() {
 
 	switch os.Args[2] {
 	case "download":
-		cmdSyncDownload()
+		os.Exit(runCmd(runSyncDownload))
 	case "upload":
-		cmdSyncUpload()
+		os.Exit(runCmd(runSyncUpload))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown sync subcommand: %s\n", os.Args[2])
 		fmt.Fprintln(os.Stderr, "Usage: anki-go sync <download|upload> [options]")
@@ -344,22 +324,20 @@ func cmdSync() {
 	}
 }
 
-// cmdSyncDownload downloads the full collection from AnkiWeb.
-func cmdSyncDownload() {
-	// Parse flags starting after "anki-go sync download"
+// runSyncDownload downloads the full collection from AnkiWeb.
+func runSyncDownload() error {
 	fs := flag.NewFlagSet("sync download", flag.ExitOnError)
 	db := fs.String("db", "collection.anki2", "path to collection database")
 	media := fs.String("media", "collection.media", "media directory path")
-	username := fs.String("username", "", "AnkiWeb username")
-	password := fs.String("password", "", "AnkiWeb password")
+	username := fs.String("username", envOr("ANKIWEB_USERNAME", ""), "AnkiWeb username (or $ANKIWEB_USERNAME)")
+	password := fs.String("password", envOr("ANKIWEB_PASSWORD", ""), "AnkiWeb password (or $ANKIWEB_PASSWORD)")
+	timeout := fs.Duration("timeout", 5*time.Minute, "sync timeout")
 	if err := fs.Parse(os.Args[3:]); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("parse flags: %w", err)
 	}
 
 	if *username == "" || *password == "" {
-		fmt.Fprintln(os.Stderr, "error: --username and --password are required for sync")
-		os.Exit(1)
+		return fmt.Errorf("--username and --password are required for sync (or set ANKIWEB_USERNAME/ANKIWEB_PASSWORD)")
 	}
 
 	client := sync.NewClient(goanki.SyncConfig{
@@ -367,17 +345,16 @@ func cmdSyncDownload() {
 		Password: *password,
 	})
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
 
 	if err := client.Authenticate(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "error: authenticate: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("authenticate: %w", err)
 	}
 
 	result, err := client.FullDownload(ctx, *db, *media)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: download: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("download: %w", err)
 	}
 
 	// Open the downloaded collection to count cards
@@ -385,7 +362,7 @@ func cmdSyncDownload() {
 	if openErr != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not open downloaded collection: %v\n", openErr)
 		fmt.Printf("Downloaded to %s\n", result.DBPath)
-		return
+		return nil
 	}
 	defer func() { _ = col.Close() }()
 
@@ -393,28 +370,27 @@ func cmdSyncDownload() {
 	if statsErr != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not read stats: %v\n", statsErr)
 		fmt.Printf("Downloaded to %s\n", result.DBPath)
-		return
+		return nil
 	}
 
-	fmt.Printf("%d\n", stats.TotalCards)
+	fmt.Printf("Downloaded %d cards to %s\n", stats.TotalCards, result.DBPath)
+	return nil
 }
 
-// cmdSyncUpload uploads the full collection to AnkiWeb.
-func cmdSyncUpload() {
-	// Parse flags starting after "anki-go sync upload"
+// runSyncUpload uploads the full collection to AnkiWeb.
+func runSyncUpload() error {
 	fs := flag.NewFlagSet("sync upload", flag.ExitOnError)
 	db := fs.String("db", "collection.anki2", "path to collection database")
 	media := fs.String("media", "collection.media", "media directory path")
-	username := fs.String("username", "", "AnkiWeb username")
-	password := fs.String("password", "", "AnkiWeb password")
+	username := fs.String("username", envOr("ANKIWEB_USERNAME", ""), "AnkiWeb username (or $ANKIWEB_USERNAME)")
+	password := fs.String("password", envOr("ANKIWEB_PASSWORD", ""), "AnkiWeb password (or $ANKIWEB_PASSWORD)")
+	timeout := fs.Duration("timeout", 5*time.Minute, "sync timeout")
 	if err := fs.Parse(os.Args[3:]); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("parse flags: %w", err)
 	}
 
 	if *username == "" || *password == "" {
-		fmt.Fprintln(os.Stderr, "error: --username and --password are required for sync")
-		os.Exit(1)
+		return fmt.Errorf("--username and --password are required for sync (or set ANKIWEB_USERNAME/ANKIWEB_PASSWORD)")
 	}
 
 	client := sync.NewClient(goanki.SyncConfig{
@@ -422,32 +398,35 @@ func cmdSyncUpload() {
 		Password: *password,
 	})
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
 
 	if err := client.Authenticate(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "error: authenticate: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("authenticate: %w", err)
 	}
 
 	if err := client.FullUpload(ctx, *db, *media); err != nil {
-		fmt.Fprintf(os.Stderr, "error: upload: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("upload: %w", err)
 	}
 
-	fmt.Println("ok")
+	fmt.Println("Upload complete.")
+	return nil
 }
 
-// cmdServe starts the HTTP API server.
-func cmdServe() {
+// runServe starts the HTTP API server.
+func runServe() error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	db := fs.String("db", "collection.anki2", "path to collection database")
 	media := fs.String("media", "collection.media", "media directory path")
 	port := fs.Int("port", 8765, "HTTP server port")
-	username := fs.String("username", "", "AnkiWeb username (optional, enables sync endpoints)")
-	password := fs.String("password", "", "AnkiWeb password (optional, enables sync endpoints)")
+	username := fs.String("username", envOr("ANKIWEB_USERNAME", ""), "AnkiWeb username (optional, enables sync endpoints)")
+	password := fs.String("password", envOr("ANKIWEB_PASSWORD", ""), "AnkiWeb password (optional, enables sync endpoints)")
 	if err := fs.Parse(os.Args[2:]); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("parse flags: %w", err)
+	}
+
+	if *port < 1 || *port > 65535 {
+		return fmt.Errorf("invalid port %d: must be between 1 and 65535", *port)
 	}
 
 	opts := []server.ServerOption{
@@ -465,8 +444,14 @@ func cmdServe() {
 
 	srv := server.NewServer(*db, opts...)
 
-	if err := srv.ListenAndServe(); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+	fmt.Printf("go-anki server starting on :%d (db: %s)\n", *port, *db)
+	return srv.ListenAndServe()
+}
+
+// envOr returns the environment variable value if set, otherwise returns fallback.
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
 	}
+	return fallback
 }
