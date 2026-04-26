@@ -49,15 +49,6 @@ type ExportOptions struct {
 
 // ImportResult contains information about an imported .apkg or .colpkg file.
 type ImportResult struct {
-	// CardsImported is the number of cards imported.
-	CardsImported int
-
-	// NotesImported is the number of notes imported.
-	NotesImported int
-
-	// DecksImported is the list of deck names imported.
-	DecksImported []string
-
 	// MediaFilesImported is the number of media files extracted.
 	MediaFilesImported int
 }
@@ -78,6 +69,9 @@ func ExportApkg(opts ExportOptions) error {
 	}
 	if opts.OutputPath == "" {
 		return fmt.Errorf("output path is required")
+	}
+	if opts.MediaMap != nil && opts.MediaDir == "" {
+		return fmt.Errorf("media map provided without media directory; set MediaDir to include media files")
 	}
 
 	// Read the source database
@@ -128,9 +122,6 @@ func ExportApkg(opts ExportOptions) error {
 
 	// Add media files
 	for idxStr, filename := range mediaMap {
-		if opts.MediaDir == "" {
-			continue
-		}
 		mediaPath := filepath.Join(opts.MediaDir, filename)
 		mediaData, err := os.ReadFile(mediaPath)
 		if err != nil {
@@ -166,21 +157,15 @@ func ImportApkg(apkgPath string, destDir string) (*ImportResult, error) {
 		return nil, fmt.Errorf("create destination directory: %w", err)
 	}
 
-	result := &ImportResult{}
+	// First pass: extract the collection database and parse the media map.
 	var mediaMap MediaMap
-
 	for _, file := range reader.File {
-		// Extract collection.anki2
 		if file.Name == "collection.anki2" || file.Name == "collection.anki21b" {
 			dbPath := filepath.Join(destDir, "collection.anki2")
 			if err := extractZipFile(file, dbPath); err != nil {
 				return nil, fmt.Errorf("extract collection: %w", err)
 			}
-			continue
-		}
-
-		// Parse media map
-		if file.Name == "media" {
+		} else if file.Name == "media" {
 			rc, err := file.Open()
 			if err != nil {
 				return nil, fmt.Errorf("open media map: %w", err)
@@ -190,25 +175,29 @@ func ImportApkg(apkgPath string, destDir string) (*ImportResult, error) {
 			if err != nil {
 				return nil, fmt.Errorf("read media map: %w", err)
 			}
-			if err := json.Unmarshal(data, &mediaMap); err != nil {
-				// Not a JSON media map, skip
+			_ = json.Unmarshal(data, &mediaMap)
+		}
+	}
+
+	// Second pass: extract media files using the parsed map.
+	result := &ImportResult{}
+	if mediaMap != nil {
+		mediaDir := filepath.Join(destDir, "collection.media")
+		if err := os.MkdirAll(mediaDir, 0755); err != nil {
+			return nil, fmt.Errorf("create media directory: %w", err)
+		}
+		for _, file := range reader.File {
+			if !isNumeric(file.Name) {
 				continue
 			}
-			continue
-		}
-
-		// Extract media files
-		if mediaMap != nil && isNumeric(file.Name) {
 			filename, ok := mediaMap[file.Name]
 			if !ok {
-				// Unknown media file, skip
 				continue
 			}
-			mediaDir := filepath.Join(destDir, "collection.media")
-			if err := os.MkdirAll(mediaDir, 0755); err != nil {
-				return nil, fmt.Errorf("create media directory: %w", err)
-			}
 			mediaPath := filepath.Join(mediaDir, filename)
+			if err := validatePathWithinDir(mediaPath, mediaDir); err != nil {
+				return nil, fmt.Errorf("media file path escapes destination: %s: %w", filename, err)
+			}
 			if err := extractZipFile(file, mediaPath); err != nil {
 				return nil, fmt.Errorf("extract media file %s: %w", filename, err)
 			}
@@ -236,28 +225,17 @@ func ImportColpkg(colpkgPath string, destDir string) (*ImportResult, error) {
 		return nil, fmt.Errorf("create destination directory: %w", err)
 	}
 
-	result := &ImportResult{}
+	// First pass: extract/decompress the collection database and parse the media map.
 	var mediaMap MediaMap
-
 	for _, file := range reader.File {
-		// Extract collection.anki21b (zstd-compressed) or collection.anki2
 		if file.Name == "collection.anki21b" {
-			// Zstandard-compressed — decompress to collection.anki2
 			dbPath := filepath.Join(destDir, "collection.anki2")
 			if err := extractZstdZipFile(file, dbPath); err != nil {
 				return nil, fmt.Errorf("decompress collection: %w", err)
 			}
-			continue
-		}
-
-		if file.Name == "collection.anki2" {
+		} else if file.Name == "collection.anki2" {
 			// In .colpkg, this is a small placeholder file — skip it
-			// The real data is in collection.anki21b
-			continue
-		}
-
-		// Parse media map
-		if file.Name == "media" {
+		} else if file.Name == "media" {
 			rc, err := file.Open()
 			if err != nil {
 				return nil, fmt.Errorf("open media map: %w", err)
@@ -267,23 +245,29 @@ func ImportColpkg(colpkgPath string, destDir string) (*ImportResult, error) {
 			if err != nil {
 				return nil, fmt.Errorf("read media map: %w", err)
 			}
-			if err := json.Unmarshal(data, &mediaMap); err != nil {
+			_ = json.Unmarshal(data, &mediaMap)
+		}
+	}
+
+	// Second pass: extract media files using the parsed map.
+	result := &ImportResult{}
+	if mediaMap != nil {
+		mediaDir := filepath.Join(destDir, "collection.media")
+		if err := os.MkdirAll(mediaDir, 0755); err != nil {
+			return nil, fmt.Errorf("create media directory: %w", err)
+		}
+		for _, file := range reader.File {
+			if !isNumeric(file.Name) {
 				continue
 			}
-			continue
-		}
-
-		// Extract media files
-		if mediaMap != nil && isNumeric(file.Name) {
 			filename, ok := mediaMap[file.Name]
 			if !ok {
 				continue
 			}
-			mediaDir := filepath.Join(destDir, "collection.media")
-			if err := os.MkdirAll(mediaDir, 0755); err != nil {
-				return nil, fmt.Errorf("create media directory: %w", err)
-			}
 			mediaPath := filepath.Join(mediaDir, filename)
+			if err := validatePathWithinDir(mediaPath, mediaDir); err != nil {
+				return nil, fmt.Errorf("media file path escapes destination: %s: %w", filename, err)
+			}
 			if err := extractZipFile(file, mediaPath); err != nil {
 				return nil, fmt.Errorf("extract media file %s: %w", filename, err)
 			}
@@ -292,6 +276,17 @@ func ImportColpkg(colpkgPath string, destDir string) (*ImportResult, error) {
 	}
 
 	return result, nil
+}
+
+// validatePathWithinDir checks that the resolved path stays within the
+// specified directory, preventing path traversal attacks.
+func validatePathWithinDir(path, dir string) error {
+	cleanPath := filepath.Clean(path)
+	cleanDir := filepath.Clean(dir)
+	if !strings.HasPrefix(cleanPath+string(os.PathSeparator), cleanDir+string(os.PathSeparator)) && cleanPath != cleanDir {
+		return fmt.Errorf("path escapes directory: %s", path)
+	}
+	return nil
 }
 
 // extractZipFile extracts a single file from a ZIP archive to disk.

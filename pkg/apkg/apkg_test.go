@@ -65,7 +65,9 @@ func TestExportAndImportApkg(t *testing.T) {
 		t.Error("imported database does not match original")
 	}
 
-	t.Logf("Imported %d media files", result.MediaFilesImported)
+	if result.MediaFilesImported != 1 {
+		t.Errorf("expected 1 media file, got %d", result.MediaFilesImported)
+	}
 }
 
 func TestExportApkgWithoutMedia(t *testing.T) {
@@ -91,6 +93,23 @@ func TestExportApkgWithoutMedia(t *testing.T) {
 
 	if result.MediaFilesImported != 0 {
 		t.Errorf("expected 0 media files, got %d", result.MediaFilesImported)
+	}
+}
+
+func TestExportApkgMediaMapWithoutMediaDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	sourceDB := filepath.Join(tmpDir, "collection.anki2")
+	createMinimalAnkiDB(t, sourceDB)
+
+	apkgPath := filepath.Join(tmpDir, "test.apkg")
+	err := ExportApkg(ExportOptions{
+		SourceDB:   sourceDB,
+		OutputPath: apkgPath,
+		DeckName:   "Test Deck",
+		MediaMap:   MediaMap{"0": "test.png"},
+	})
+	if err == nil {
+		t.Fatal("expected error when MediaMap is set but MediaDir is empty")
 	}
 }
 
@@ -134,6 +153,13 @@ func TestDiscoverMediaFiles(t *testing.T) {
 		if name == ".hidden" {
 			t.Error("hidden file should be skipped")
 		}
+	}
+}
+
+func TestPathTraversalInMediaFilename(t *testing.T) {
+	err := validatePathWithinDir("/tmp/media/../etc/passwd", "/tmp/media")
+	if err == nil {
+		t.Error("expected path traversal to be detected")
 	}
 }
 
