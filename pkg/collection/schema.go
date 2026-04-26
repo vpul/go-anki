@@ -2,6 +2,7 @@ package collection
 
 import (
 	"fmt"
+	"log"
 	"strings"
 
 	modernc "modernc.org/sqlite"
@@ -16,7 +17,11 @@ func init() {
 	// modernc.org/sqlite cannot read those tables at all because the collation is
 	// unknown. We implement it as a case-insensitive comparison which is close enough
 	// for our read-only needs.
-	modernc.RegisterCollationUtf8("unicase", func(a, b string) int {
+	//
+	// Note: This registration is global to the process. If the app ever opens
+	// non-Anki SQLite databases, they'll also see the "unicase" collation, which
+	// is harmless.
+	if err := modernc.RegisterCollationUtf8("unicase", func(a, b string) int {
 		al := strings.ToLower(a)
 		bl := strings.ToLower(b)
 		if al < bl {
@@ -26,7 +31,9 @@ func init() {
 			return 1
 		}
 		return 0
-	})
+	}); err != nil {
+		log.Printf("warning: failed to register unicase collation: %v", err)
+	}
 }
 
 // schemaVersion returns the cached Anki schema version.
@@ -50,22 +57,11 @@ func (c *Collection) isV18Plus() bool {
 	return c.schemaVersion() >= 18
 }
 
-// hasTable checks if a table exists in the database.
-func (c *Collection) hasTable(name string) bool {
-	var count int
-	err := c.db.QueryRow(
-		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", name,
-	).Scan(&count)
-	if err != nil {
-		return false
-	}
-	return count > 0
-}
-
 // getDecksV18 reads decks from the separate decks table (v18+ schema).
 func (c *Collection) getDecksV18() (map[int64]goanki.Deck, error) {
 	decks := make(map[int64]goanki.Deck)
-	rows, err := c.db.Query("SELECT id, name, mtime_secs, usn FROM decks")
+	// Single query: fetch id, name, mtime, usn, and kind (for filtered deck detection)
+	rows, err := c.db.Query("SELECT id, name, mtime_secs, usn, kind FROM decks")
 	if err != nil {
 		return nil, fmt.Errorf("query decks table: %w", err)
 	}
@@ -74,63 +70,44 @@ func (c *Collection) getDecksV18() (map[int64]goanki.Deck, error) {
 	for rows.Next() {
 		var d goanki.Deck
 		var mtime int64
-		if err := rows.Scan(&d.ID, &d.Name, &mtime, &d.USN); err != nil {
+		var kind []byte
+		if err := rows.Scan(&d.ID, &d.Name, &mtime, &d.USN, &kind); err != nil {
 			return nil, fmt.Errorf("scan deck: %w", err)
 		}
 		d.Mtime = mtime
-		// In v18, we don't have dyn/conf/desc from the table columns directly.
-		// The "kind" blob determines if a deck is filtered (dyn=1) or regular (dyn=0).
-		// For now, set defaults for regular decks. We'll determine Dyn from the kind blob.
-		d.Dyn = 0  // Will be updated below
-		d.Conf = 1 // Default config ID
+		// Default values for regular deck
+		d.Dyn = 0
+		d.Conf = 1
 		d.Desc = ""
 		d.Bury = true
+		// Determine if this is a filtered deck from the kind protobuf blob
+		d.Dyn = isFilteredDeckKind(kind)
 		decks[d.ID] = d
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate decks: %w", err)
+	}
 
-	// Determine which decks are filtered by checking the kind blob.
-	// A regular deck's kind blob is short (e.g., 0a020801).
-	// A filtered deck's kind blob is longer and contains search terms.
-	// We check the length: if kind has more than 4 bytes, it's likely filtered.
-	type deckKind struct {
-		id   int64
-		kind []byte
-	}
-	rows2, err := c.db.Query("SELECT id, kind FROM decks")
-	if err != nil {
-		// Kind information is optional; proceed with defaults
-		return decks, nil
-	}
-	defer func() { _ = rows2.Close() }()
-	for rows2.Next() {
-		var id int64
-		var kind []byte
-		if err := rows2.Scan(&id, &kind); err != nil {
-			continue
-		}
-		if d, ok := decks[id]; ok {
-			// Decode kind protobuf: regular deck kind is 0a020801 (field 1=bytes len=2: 0801)
-			// Filtered deck kind has more content with search terms.
-			// Simple heuristic: if kind bytes contain a search string, it's filtered.
-			if isFilteredDeck(kind) {
-				d.Dyn = 1
-			}
-			decks[id] = d
-		}
-	}
 	return decks, nil
 }
 
-// isFilteredDeck checks if a deck's kind blob indicates a filtered deck.
-// Regular deck kind: 0a020801 (short, ~4 bytes)
-// Filtered deck kind: contains a search string (longer)
-func isFilteredDeck(kind []byte) bool {
-	if len(kind) <= 4 {
-		return false
+// isFilteredDeckKind decodes the protobuf oneof tag from a deck's kind blob.
+// In Anki's protobuf schema, DeckKind is a oneof:
+//   - field 1 (tag 0x0a) = NormalDeck → returns 0
+//   - field 2 (tag 0x12) = FilteredDeck → returns 1
+func isFilteredDeckKind(kind []byte) int {
+	if len(kind) == 0 {
+		return 0
 	}
-	// Check if it contains typical filtered deck indicators
-	// (search terms, etc.) by looking for readable text content
-	return len(kind) > 6
+	tag, n := decodeVarint(kind)
+	if n <= 0 {
+		return 0
+	}
+	fieldNum := tag >> 3
+	if fieldNum == 2 {
+		return 1 // Filtered deck
+	}
+	return 0 // Normal deck
 }
 
 // getModelsV18 reads note types from the separate notetypes, fields, and templates
@@ -164,8 +141,11 @@ func (c *Collection) getModelsV18() (map[int64]goanki.Model, error) {
 		models[m.ID] = m
 		modelIDs = append(modelIDs, m.ID)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate notetypes: %w", err)
+	}
 
-	// For each model, query fields and templates
+	// For each model, query fields, templates, and notetype config
 	for _, mid := range modelIDs {
 		// Query fields
 		fieldRows, err := c.db.Query("SELECT ntid, ord, name FROM fields WHERE ntid = ? ORDER BY ord", mid)
@@ -214,11 +194,11 @@ func (c *Collection) getModelsV18() (map[int64]goanki.Model, error) {
 		}
 		_ = tmplRows.Close()
 
-		// Parse notetype config for CSS and sort field
+		// Parse notetype config for CSS, sort field, and type info
 		var ntConfig []byte
 		err = c.db.QueryRow("SELECT config FROM notetypes WHERE id = ?", mid).Scan(&ntConfig)
-		if err == nil {
-			parseNotetypeConfig(ntConfig, models[mid])
+		if err == nil && len(ntConfig) > 0 {
+			models[mid] = parseNotetypeConfig(ntConfig, models[mid])
 		}
 
 		m := models[mid]
@@ -233,19 +213,17 @@ func (c *Collection) getModelsV18() (map[int64]goanki.Model, error) {
 // parseTemplateConfig decodes a v18 template config protobuf blob to extract
 // the question format (qfmt) and answer format (afmt) strings.
 // The protobuf structure is:
-//   field 1: qfmt (string)
-//   field 2: afmt (string)
+//   - field 1: qfmt (string)
+//   - field 2: afmt (string)
 func parseTemplateConfig(data []byte) (qfmt, afmt string) {
-	var fieldNum uint64
-	var wireType uint64
 	for len(data) > 0 {
 		tag, n := decodeVarint(data)
 		if n <= 0 {
 			break
 		}
 		data = data[n:]
-		fieldNum = tag >> 3
-		wireType = tag & 0x7
+		fieldNum := tag >> 3
+		wireType := tag & 0x7
 
 		switch wireType {
 		case 0: // varint
@@ -254,6 +232,11 @@ func parseTemplateConfig(data []byte) (qfmt, afmt string) {
 				break
 			}
 			data = data[n:]
+		case 1: // fixed64
+			if len(data) < 8 {
+				return qfmt, afmt
+			}
+			data = data[8:]
 		case 2: // length-delimited
 			length, n := decodeVarint(data)
 			if n <= 0 || int(length) > len(data[n:]) {
@@ -269,21 +252,27 @@ func parseTemplateConfig(data []byte) (qfmt, afmt string) {
 			case 2:
 				afmt = value
 			}
+		case 5: // fixed32
+			if len(data) < 4 {
+				return qfmt, afmt
+			}
+			data = data[4:]
 		default:
-			break
+			// Unknown wire type — cannot advance safely, abort
+			return qfmt, afmt
 		}
 	}
 	return qfmt, afmt
 }
 
-// parseNotetypeConfig decodes a v18 notetype config protobuf blob and updates
-// the model with CSS, sort field, and type info.
+// parseNotetypeConfig decodes a v18 notetype config protobuf blob and returns
+// the model with CSS, sort field, and type info populated.
 // The protobuf structure is:
-//   field 1: sort_field (varint)
-//   field 2: is_cloze (bool varint)
-//   field 3: css (string)
-//   field 5: latex_pre (string)
-//   field 6: latex_post (string)
+//   - field 1: sort_field (varint)
+//   - field 2: is_cloze (bool varint)
+//   - field 3: css (string)
+//   - field 5: latex_pre (string)
+//   - field 6: latex_post (string)
 func parseNotetypeConfig(data []byte, m goanki.Model) goanki.Model {
 	for len(data) > 0 {
 		tag, n := decodeVarint(data)
@@ -309,6 +298,11 @@ func parseNotetypeConfig(data []byte, m goanki.Model) goanki.Model {
 					m.Type = 1 // Cloze
 				}
 			}
+		case 1: // fixed64
+			if len(data) < 8 {
+				return m
+			}
+			data = data[8:]
 		case 2: // length-delimited
 			length, n := decodeVarint(data)
 			if n <= 0 || int(length) > len(data[n:]) {
@@ -325,8 +319,14 @@ func parseNotetypeConfig(data []byte, m goanki.Model) goanki.Model {
 			case 6:
 				m.LatexPost = value
 			}
+		case 5: // fixed32
+			if len(data) < 4 {
+				return m
+			}
+			data = data[4:]
 		default:
-			break
+			// Unknown wire type — cannot advance safely, abort
+			return m
 		}
 	}
 	return m
@@ -349,19 +349,4 @@ func decodeVarint(data []byte) (uint64, int) {
 		}
 	}
 	return 0, 0
-}
-
-// getDeckConfigDefaultID returns the default deck config ID for v18 schema.
-// In v18+, deck configs are in the deck_config table.
-func (c *Collection) getDeckConfigDefaultID() int64 {
-	var id int64
-	err := c.db.QueryRow("SELECT id FROM deck_config WHERE name = 'Default' LIMIT 1").Scan(&id)
-	if err != nil {
-		// If "Default" doesn't work (unicase on name), try ID 1
-		err = c.db.QueryRow("SELECT id FROM deck_config WHERE id = 1").Scan(&id)
-		if err != nil {
-			return 1 // Fallback
-		}
-	}
-	return id
 }

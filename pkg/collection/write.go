@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
+	"log"
 	"strings"
 	"time"
 
@@ -152,8 +153,10 @@ func (c *Collection) CreateDeck(name string) (int64, error) {
 			configID, name, now, -1, configBlob,
 		)
 		if err != nil {
-			// Non-fatal - deck config may already exist or table may not require it
-			// Log but don't fail
+			// Non-fatal: INSERT OR IGNORE already handles duplicates, so any error
+			// here indicates a schema mismatch or write failure worth reporting.
+			// We don't fail the whole operation since the deck itself was created.
+			log.Printf("warning: failed to create deck_config for deck %d: %v", id, err)
 		}
 	} else {
 		// v11: Update JSON blob in col table

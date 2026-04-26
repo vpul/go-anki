@@ -86,7 +86,7 @@ func runDue() error {
 	deck := fs.String("deck", "", "filter by deck name")
 	limit := fs.Int("limit", 20, "maximum number of cards to show")
 	jsonOut := fs.Bool("json", false, "output as JSON")
-	if err := fs.Parse(reorderFlags(os.Args[2:])); err != nil {
+	if err := fs.Parse(reorderFlags(os.Args[2:], boolFlagsFor(fs))); err != nil {
 		return fmt.Errorf("parse flags: %w", err)
 	}
 
@@ -134,7 +134,7 @@ func runAnswer() error {
 	db := fs.String("db", "collection.anki2", "path to collection database")
 	cardIDStr := fs.String("card", "", "card ID to answer")
 	ratingStr := fs.String("rating", "", "rating: again, hard, good, or easy")
-	if err := fs.Parse(reorderFlags(os.Args[2:])); err != nil {
+	if err := fs.Parse(reorderFlags(os.Args[2:], boolFlagsFor(fs))); err != nil {
 		return fmt.Errorf("parse flags: %w", err)
 	}
 
@@ -181,7 +181,7 @@ func runAddNote() error {
 	modelName := fs.String("model", "", "note type/model name (required)")
 	fieldsRaw := fs.String("fields", "", "fields as comma-separated key=value pairs (e.g., Front=Hello,Back=World)")
 	tagsRaw := fs.String("tags", "", "comma-separated tags")
-	if err := fs.Parse(reorderFlags(os.Args[2:])); err != nil {
+	if err := fs.Parse(reorderFlags(os.Args[2:], boolFlagsFor(fs))); err != nil {
 		return fmt.Errorf("parse flags: %w", err)
 	}
 
@@ -245,7 +245,7 @@ func runCreateDeck() error {
 	fs := flag.NewFlagSet("create-deck", flag.ExitOnError)
 	db := fs.String("db", "collection.anki2", "path to collection database")
 	deckName := fs.String("name", "", "name of the deck to create (required)")
-	if err := fs.Parse(reorderFlags(os.Args[2:])); err != nil {
+	if err := fs.Parse(reorderFlags(os.Args[2:], boolFlagsFor(fs))); err != nil {
 		return fmt.Errorf("parse flags: %w", err)
 	}
 
@@ -278,7 +278,7 @@ func runStats() error {
 	fs := flag.NewFlagSet("stats", flag.ExitOnError)
 	db := fs.String("db", "collection.anki2", "path to collection database")
 	jsonOut := fs.Bool("json", false, "output as JSON")
-	if err := fs.Parse(reorderFlags(os.Args[2:])); err != nil {
+	if err := fs.Parse(reorderFlags(os.Args[2:], boolFlagsFor(fs))); err != nil {
 		return fmt.Errorf("parse flags: %w", err)
 	}
 
@@ -338,7 +338,7 @@ func runSyncDownload() error {
 	username := fs.String("username", envOr("ANKIWEB_USERNAME", ""), "AnkiWeb username (or $ANKIWEB_USERNAME)")
 	password := fs.String("password", envOr("ANKIWEB_PASSWORD", ""), "AnkiWeb password (or $ANKIWEB_PASSWORD)")
 	timeout := fs.Duration("timeout", 5*time.Minute, "sync timeout")
-	if err := fs.Parse(reorderFlags(os.Args[3:])); err != nil {
+	if err := fs.Parse(reorderFlags(os.Args[3:], boolFlagsFor(fs))); err != nil {
 		return fmt.Errorf("parse flags: %w", err)
 	}
 
@@ -391,7 +391,7 @@ func runSyncUpload() error {
 	username := fs.String("username", envOr("ANKIWEB_USERNAME", ""), "AnkiWeb username (or $ANKIWEB_USERNAME)")
 	password := fs.String("password", envOr("ANKIWEB_PASSWORD", ""), "AnkiWeb password (or $ANKIWEB_PASSWORD)")
 	timeout := fs.Duration("timeout", 5*time.Minute, "sync timeout")
-	if err := fs.Parse(reorderFlags(os.Args[3:])); err != nil {
+	if err := fs.Parse(reorderFlags(os.Args[3:], boolFlagsFor(fs))); err != nil {
 		return fmt.Errorf("parse flags: %w", err)
 	}
 
@@ -427,7 +427,7 @@ func runServe() error {
 	port := fs.Int("port", 8765, "HTTP server port")
 	username := fs.String("username", envOr("ANKIWEB_USERNAME", ""), "AnkiWeb username (optional, enables sync endpoints)")
 	password := fs.String("password", envOr("ANKIWEB_PASSWORD", ""), "AnkiWeb password (optional, enables sync endpoints)")
-	if err := fs.Parse(reorderFlags(os.Args[2:])); err != nil {
+	if err := fs.Parse(reorderFlags(os.Args[2:], boolFlagsFor(fs))); err != nil {
 		return fmt.Errorf("parse flags: %w", err)
 	}
 
@@ -460,15 +460,11 @@ func runServe() error {
 // reordering, "create-deck MyDeck --db /tmp/test.anki2" would fail to
 // parse --db because "MyDeck" appears first and is treated as positional.
 //
-// Known boolean flags (which don't consume the next argument) are handled
-// correctly so that positional arguments after bool flags aren't swallowed.
-func reorderFlags(args []string) []string {
+// Boolean flags (which don't consume the next argument) are detected
+// by pre-scanning each subcommand's FlagSet so the map stays accurate
+// as new flags are added.
+func reorderFlags(args []string, boolFlags map[string]bool) []string {
 	var flags, positional []string
-	boolFlags := map[string]bool{
-		"json": true,
-		"h":    true,
-		"help": true,
-	}
 
 	for i := 0; i < len(args); i++ {
 		if strings.HasPrefix(args[i], "-") {
@@ -494,6 +490,17 @@ func reorderFlags(args []string) []string {
 		}
 	}
 	return append(flags, positional...)
+}
+
+// boolFlagsFor collects all boolean flags from a FlagSet into a lookup map.
+func boolFlagsFor(fs *flag.FlagSet) map[string]bool {
+	m := make(map[string]bool)
+	fs.VisitAll(func(f *flag.Flag) {
+		if fb, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && fb.IsBoolFlag() {
+			m[f.Name] = true
+		}
+	})
+	return m
 }
 
 // envOr returns the environment variable value if set, otherwise returns fallback.
