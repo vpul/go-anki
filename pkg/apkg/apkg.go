@@ -160,12 +160,13 @@ func ImportApkg(apkgPath string, destDir string) (*ImportResult, error) {
 	// First pass: extract the collection database and parse the media map.
 	var mediaMap MediaMap
 	for _, file := range reader.File {
-		if file.Name == "collection.anki2" || file.Name == "collection.anki21b" {
+		switch file.Name {
+		case "collection.anki2", "collection.anki21b":
 			dbPath := filepath.Join(destDir, "collection.anki2")
 			if err := extractZipFile(file, dbPath); err != nil {
 				return nil, fmt.Errorf("extract collection: %w", err)
 			}
-		} else if file.Name == "media" {
+		case "media":
 			rc, err := file.Open()
 			if err != nil {
 				return nil, fmt.Errorf("open media map: %w", err)
@@ -228,14 +229,15 @@ func ImportColpkg(colpkgPath string, destDir string) (*ImportResult, error) {
 	// First pass: extract/decompress the collection database and parse the media map.
 	var mediaMap MediaMap
 	for _, file := range reader.File {
-		if file.Name == "collection.anki21b" {
+		switch file.Name {
+		case "collection.anki21b":
 			dbPath := filepath.Join(destDir, "collection.anki2")
 			if err := extractZstdZipFile(file, dbPath); err != nil {
 				return nil, fmt.Errorf("decompress collection: %w", err)
 			}
-		} else if file.Name == "collection.anki2" {
+		case "collection.anki2":
 			// In .colpkg, this is a small placeholder file — skip it
-		} else if file.Name == "media" {
+		case "media":
 			rc, err := file.Open()
 			if err != nil {
 				return nil, fmt.Errorf("open media map: %w", err)
