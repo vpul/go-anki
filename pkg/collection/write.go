@@ -305,14 +305,22 @@ func dayOffsetSinceCreation(c *Collection) int64 {
 }
 
 // generateGUID creates a cryptographically random 10-character GUID for a note.
+// Uses rejection sampling to avoid modulo bias (since 256 is not evenly
+// divisible by 62, we reject bytes >= 248 and only accept bytes in [0, 248)
+// which gives uniform distribution over the 62-character alphabet).
 func generateGUID() string {
 	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	b := make([]byte, 10)
-	_, _ = rand.Read(b)
-	for i := range b {
-		b[i] = chars[b[i]%byte(len(chars))]
+	const maxByte = byte(248) // 62 * 4 = 248, giving uniform distribution
+	result := make([]byte, 10)
+	for i := 0; i < len(result); {
+		b := make([]byte, 1)
+		_, _ = rand.Read(b)
+		if b[0] < maxByte {
+			result[i] = chars[b[0]%byte(len(chars))]
+			i++
+		}
 	}
-	return string(b)
+	return string(result)
 }
 
 // fieldChecksum computes the Anki field checksum.
