@@ -144,7 +144,7 @@ func createTestDBWithMode(t *testing.T, mode OpenMode) (*Collection, string) {
 		t.Fatalf("insert card: %v", err)
 	}
 
-	db.Close()
+	_ = db.Close()
 
 	col, err := Open(dbPath, mode)
 	if err != nil {
