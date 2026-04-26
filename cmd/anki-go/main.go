@@ -86,7 +86,7 @@ func runDue() error {
 	deck := fs.String("deck", "", "filter by deck name")
 	limit := fs.Int("limit", 20, "maximum number of cards to show")
 	jsonOut := fs.Bool("json", false, "output as JSON")
-	if err := fs.Parse(os.Args[2:]); err != nil {
+	if err := fs.Parse(reorderFlags(os.Args[2:])); err != nil {
 		return fmt.Errorf("parse flags: %w", err)
 	}
 
@@ -132,18 +132,19 @@ func runDue() error {
 func runAnswer() error {
 	fs := flag.NewFlagSet("answer", flag.ExitOnError)
 	db := fs.String("db", "collection.anki2", "path to collection database")
+	cardIDStr := fs.String("card", "", "card ID to answer")
 	ratingStr := fs.String("rating", "", "rating: again, hard, good, or easy")
-	if err := fs.Parse(os.Args[2:]); err != nil {
+	if err := fs.Parse(reorderFlags(os.Args[2:])); err != nil {
 		return fmt.Errorf("parse flags: %w", err)
 	}
 
-	if fs.NArg() < 1 {
-		return fmt.Errorf("card ID is required; usage: anki-go answer <card-id> --rating=again|hard|good|easy [--db=path]")
+	if *cardIDStr == "" {
+		return fmt.Errorf("--card is required; usage: anki-go answer --card <card-id> --rating <again|hard|good|easy> [--db=path]")
 	}
 
-	cardID, err := strconv.ParseInt(fs.Arg(0), 10, 64)
+	cardID, err := strconv.ParseInt(*cardIDStr, 10, 64)
 	if err != nil {
-		return fmt.Errorf("invalid card ID %q: %w", fs.Arg(0), err)
+		return fmt.Errorf("invalid card ID %q: %w", *cardIDStr, err)
 	}
 
 	switch *ratingStr {
@@ -180,7 +181,7 @@ func runAddNote() error {
 	modelName := fs.String("model", "", "note type/model name (required)")
 	fieldsRaw := fs.String("fields", "", "fields as comma-separated key=value pairs (e.g., Front=Hello,Back=World)")
 	tagsRaw := fs.String("tags", "", "comma-separated tags")
-	if err := fs.Parse(os.Args[2:]); err != nil {
+	if err := fs.Parse(reorderFlags(os.Args[2:])); err != nil {
 		return fmt.Errorf("parse flags: %w", err)
 	}
 
@@ -243,14 +244,19 @@ func runAddNote() error {
 func runCreateDeck() error {
 	fs := flag.NewFlagSet("create-deck", flag.ExitOnError)
 	db := fs.String("db", "collection.anki2", "path to collection database")
-	if err := fs.Parse(os.Args[2:]); err != nil {
+	deckName := fs.String("name", "", "name of the deck to create (required)")
+	if err := fs.Parse(reorderFlags(os.Args[2:])); err != nil {
 		return fmt.Errorf("parse flags: %w", err)
 	}
 
-	if fs.NArg() < 1 {
+	// Also accept a positional argument for the deck name (backward compat).
+	if *deckName == "" && fs.NArg() >= 1 {
+		*deckName = fs.Arg(0)
+	}
+
+	if *deckName == "" {
 		return fmt.Errorf("deck name is required; usage: anki-go create-deck <name> [--db=path]")
 	}
-	deckName := fs.Arg(0)
 
 	col, err := collection.Open(*db, collection.ReadWrite)
 	if err != nil {
@@ -258,7 +264,7 @@ func runCreateDeck() error {
 	}
 	defer func() { _ = col.Close() }()
 
-	deckID, err := col.CreateDeck(deckName)
+	deckID, err := col.CreateDeck(*deckName)
 	if err != nil {
 		return fmt.Errorf("create deck: %w", err)
 	}
@@ -272,7 +278,7 @@ func runStats() error {
 	fs := flag.NewFlagSet("stats", flag.ExitOnError)
 	db := fs.String("db", "collection.anki2", "path to collection database")
 	jsonOut := fs.Bool("json", false, "output as JSON")
-	if err := fs.Parse(os.Args[2:]); err != nil {
+	if err := fs.Parse(reorderFlags(os.Args[2:])); err != nil {
 		return fmt.Errorf("parse flags: %w", err)
 	}
 
@@ -332,7 +338,7 @@ func runSyncDownload() error {
 	username := fs.String("username", envOr("ANKIWEB_USERNAME", ""), "AnkiWeb username (or $ANKIWEB_USERNAME)")
 	password := fs.String("password", envOr("ANKIWEB_PASSWORD", ""), "AnkiWeb password (or $ANKIWEB_PASSWORD)")
 	timeout := fs.Duration("timeout", 5*time.Minute, "sync timeout")
-	if err := fs.Parse(os.Args[3:]); err != nil {
+	if err := fs.Parse(reorderFlags(os.Args[3:])); err != nil {
 		return fmt.Errorf("parse flags: %w", err)
 	}
 
@@ -385,7 +391,7 @@ func runSyncUpload() error {
 	username := fs.String("username", envOr("ANKIWEB_USERNAME", ""), "AnkiWeb username (or $ANKIWEB_USERNAME)")
 	password := fs.String("password", envOr("ANKIWEB_PASSWORD", ""), "AnkiWeb password (or $ANKIWEB_PASSWORD)")
 	timeout := fs.Duration("timeout", 5*time.Minute, "sync timeout")
-	if err := fs.Parse(os.Args[3:]); err != nil {
+	if err := fs.Parse(reorderFlags(os.Args[3:])); err != nil {
 		return fmt.Errorf("parse flags: %w", err)
 	}
 
@@ -421,7 +427,7 @@ func runServe() error {
 	port := fs.Int("port", 8765, "HTTP server port")
 	username := fs.String("username", envOr("ANKIWEB_USERNAME", ""), "AnkiWeb username (optional, enables sync endpoints)")
 	password := fs.String("password", envOr("ANKIWEB_PASSWORD", ""), "AnkiWeb password (optional, enables sync endpoints)")
-	if err := fs.Parse(os.Args[2:]); err != nil {
+	if err := fs.Parse(reorderFlags(os.Args[2:])); err != nil {
 		return fmt.Errorf("parse flags: %w", err)
 	}
 
@@ -446,6 +452,48 @@ func runServe() error {
 
 	fmt.Printf("go-anki server starting on :%d (db: %s)\n", *port, *db)
 	return srv.ListenAndServe()
+}
+
+// reorderFlags moves all flag arguments (starting with -) and their values
+// before positional arguments. This works around Go's standard flag package
+// behavior, which stops parsing at the first non-flag argument. Without
+// reordering, "create-deck MyDeck --db /tmp/test.anki2" would fail to
+// parse --db because "MyDeck" appears first and is treated as positional.
+//
+// Known boolean flags (which don't consume the next argument) are handled
+// correctly so that positional arguments after bool flags aren't swallowed.
+func reorderFlags(args []string) []string {
+	var flags, positional []string
+	boolFlags := map[string]bool{
+		"json": true,
+		"h":    true,
+		"help": true,
+	}
+
+	for i := 0; i < len(args); i++ {
+		if strings.HasPrefix(args[i], "-") {
+			flags = append(flags, args[i])
+			// Handle --flag=value form: value is embedded, no separate arg.
+			if idx := strings.IndexByte(args[i], '='); idx >= 0 {
+				continue
+			}
+			// Determine the flag name (strip leading dashes).
+			name := strings.TrimLeft(args[i], "-")
+			if boolFlags[name] {
+				// Bool flag, no value arg to consume.
+				continue
+			}
+			// Non-bool flag: consume the next argument as its value
+			// (if present and not starting with -).
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++
+				flags = append(flags, args[i])
+			}
+		} else {
+			positional = append(positional, args[i])
+		}
+	}
+	return append(flags, positional...)
 }
 
 // envOr returns the environment variable value if set, otherwise returns fallback.

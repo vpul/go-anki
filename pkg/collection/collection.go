@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	// Pure Go SQLite driver — no CGO required
@@ -17,8 +18,9 @@ var ErrNotFound = errors.New("not found")
 
 // Collection represents an open Anki .anki2 database.
 type Collection struct {
-	db   *sql.DB
-	path string
+	db     *sql.DB
+	path   string
+	schema int // cached schema version (0 = unset, 11 = old JSON blob, 18+ = table-based)
 }
 
 // OpenMode controls database access mode.
@@ -34,12 +36,28 @@ const (
 //   - ReadOnly: open in read-only mode (safe, no writes possible)
 //   - ReadWrite: open in read-write mode (required for answering cards, creating notes)
 func Open(path string, mode OpenMode) (*Collection, error) {
+	// Validate that the database file exists and is non-empty before opening.
+	// Without this check, mode=rwc silently creates a brand-new empty database,
+	// which then fails with a confusing "no such table: col" error.
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("collection file does not exist: %s", path)
+		}
+		return nil, fmt.Errorf("stat collection file: %w", err)
+	}
+	if info.Size() == 0 {
+		return nil, fmt.Errorf("collection file is empty (0 bytes): %s", path)
+	}
+
 	var dsn string
 	switch mode {
 	case ReadOnly:
 		dsn = fmt.Sprintf("file:%s?mode=ro", path)
 	case ReadWrite:
-		dsn = fmt.Sprintf("file:%s?mode=rwc", path)
+		// Use mode=rw (not rwc) so that a missing file produces a clear error
+		// instead of silently creating an empty database with no Anki tables.
+		dsn = fmt.Sprintf("file:%s?mode=rw", path)
 	default:
 		dsn = fmt.Sprintf("file:%s?mode=ro", path)
 	}
@@ -49,7 +67,7 @@ func Open(path string, mode OpenMode) (*Collection, error) {
 		return nil, fmt.Errorf("open anki collection: %w", err)
 	}
 
-	// Verify this is actually an Anki database
+	// Verify this is actually an Anki database and cache schema version
 	var ver int
 	err = db.QueryRow("SELECT ver FROM col").Scan(&ver)
 	if err != nil {
@@ -65,7 +83,7 @@ func Open(path string, mode OpenMode) (*Collection, error) {
 		}
 	}
 
-	return &Collection{db: db, path: path}, nil
+	return &Collection{db: db, path: path, schema: ver}, nil
 }
 
 // Close closes the database connection.
@@ -85,6 +103,9 @@ func (c *Collection) DB() *sql.DB {
 
 // GetDecks returns all decks in the collection.
 func (c *Collection) GetDecks() (map[int64]goanki.Deck, error) {
+	if c.isV18Plus() {
+		return c.getDecksV18()
+	}
 	var decksJSON string
 	err := c.db.QueryRow("SELECT decks FROM col").Scan(&decksJSON)
 	if err != nil {
@@ -109,6 +130,9 @@ func (c *Collection) GetDeckByName(name string) (*goanki.Deck, error) {
 
 // GetModels returns all note types (models) in the collection.
 func (c *Collection) GetModels() (map[int64]goanki.Model, error) {
+	if c.isV18Plus() {
+		return c.getModelsV18()
+	}
 	var modelsJSON string
 	err := c.db.QueryRow("SELECT models FROM col").Scan(&modelsJSON)
 	if err != nil {
@@ -308,14 +332,57 @@ func (c *Collection) GetStats() (*goanki.Stats, error) {
 // This avoids the COLLATE unicase issue by doing a simple ID lookup.
 func (c *Collection) getNoteByID(id int64) (*goanki.Note, error) {
 	var note goanki.Note
-	err := c.db.QueryRow(`
-		SELECT id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data
-		FROM notes WHERE id = ?`, id).Scan(
-		&note.ID, &note.GUID, &note.MID, &note.Mod, &note.USN,
-		&note.Tags, &note.Flds, &note.Sfld, &note.Csum, &note.Flags, &note.Data,
-	)
-	if err != nil {
-		return nil, err
+
+	if c.isV18Plus() {
+		// In v18+, sfld and csum are INTEGER columns, but the actual values may be
+		// stored as either integers or strings depending on Anki's behavior.
+		// We scan them into interface{} and format accordingly.
+		var sfld interface{}
+		var csum interface{}
+		err := c.db.QueryRow(`
+			SELECT id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data
+			FROM notes WHERE id = ?`, id).Scan(
+			&note.ID, &note.GUID, &note.MID, &note.Mod, &note.USN,
+			&note.Tags, &note.Flds, &sfld, &csum, &note.Flags, &note.Data,
+		)
+		if err != nil {
+			return nil, err
+		}
+		// Convert sfld and csum to strings regardless of stored type
+		switch v := sfld.(type) {
+		case string:
+			note.Sfld = v
+		case int64:
+			note.Sfld = fmt.Sprintf("%d", v)
+		case float64:
+			note.Sfld = fmt.Sprintf("%v", v)
+		case nil:
+			note.Sfld = ""
+		default:
+			note.Sfld = fmt.Sprintf("%v", v)
+		}
+		switch v := csum.(type) {
+		case string:
+			note.Csum = v
+		case int64:
+			note.Csum = fmt.Sprintf("%d", v)
+		case float64:
+			note.Csum = fmt.Sprintf("%v", v)
+		case nil:
+			note.Csum = ""
+		default:
+			note.Csum = fmt.Sprintf("%v", v)
+		}
+	} else {
+		err := c.db.QueryRow(`
+			SELECT id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data
+			FROM notes WHERE id = ?`, id).Scan(
+			&note.ID, &note.GUID, &note.MID, &note.Mod, &note.USN,
+			&note.Tags, &note.Flds, &note.Sfld, &note.Csum, &note.Flags, &note.Data,
+		)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &note, nil
 }
