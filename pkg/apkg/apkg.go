@@ -23,6 +23,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 // ExportOptions configures how an .apkg file is created.
@@ -495,7 +497,9 @@ func extractZstdZipFile(file *zip.File, destPath string) error {
 }
 
 // extractZstdZipFileWithLimit extracts a Zstandard-compressed file from a ZIP archive,
-// enforcing size limits on decompression. Returns decompressed size.
+// enforcing size limits on both compressed and decompressed data. Returns decompressed size.
+// This streams through the zstd decompressor with an output limit, preventing zip bombs
+// where a small compressed payload expands to many gigabytes.
 func extractZstdZipFileWithLimit(file *zip.File, destPath string, maxSize int64) (int64, error) {
 	rc, err := file.Open()
 	if err != nil {
@@ -504,14 +508,22 @@ func extractZstdZipFileWithLimit(file *zip.File, destPath string, maxSize int64)
 	defer func() { _ = rc.Close() }()
 
 	// Read compressed data with limit
-	limited := io.LimitReader(rc, maxSize+1) // +1 to detect oversized compressed data
-	compressed, err := io.ReadAll(limited)
+	limitedCompressed := io.LimitReader(rc, maxSize+1) // +1 to detect oversized compressed data
+	compressed, err := io.ReadAll(limitedCompressed)
 	if err != nil {
 		return 0, fmt.Errorf("read zip entry %s: %w", file.Name, err)
 	}
 
-	// Decompress using Zstandard
-	decompressed, err := decompressZstd(compressed)
+	// Stream decompression with an output size limit to prevent decompression bombs.
+	// A small compressed payload can expand to many gigabytes; this bounds the memory usage.
+	zstdReader, err := zstd.NewReader(bytes.NewReader(compressed))
+	if err != nil {
+		return 0, fmt.Errorf("create zstd reader for %s: %w", file.Name, err)
+	}
+	defer zstdReader.Close()
+
+	limitedDec := io.LimitReader(zstdReader, maxSize+1) // +1 to detect overflow
+	decompressed, err := io.ReadAll(limitedDec)
 	if err != nil {
 		return 0, fmt.Errorf("decompress %s: %w", file.Name, err)
 	}

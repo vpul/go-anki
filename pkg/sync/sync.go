@@ -424,6 +424,13 @@ func validateURL(u string) error {
 		if ip == nil {
 			return fmt.Errorf("resolved non-IP address %q for hostname %q", addr, hostname)
 		}
+		// Normalize to 4-byte form for IPv4 addresses. This converts
+		// ::ffff:a.b.c.d (IPv4-mapped IPv6) to plain 4-byte a.b.c.d, so that
+		// IPv4-mapped addresses are checked against IPv4 private ranges instead
+		// of being caught by an over-broad ::ffff:0:0/96 net.
+		if v4 := ip.To4(); v4 != nil {
+			ip = v4
+		}
 		if isPrivateIP(ip) {
 			// Allow loopback only if explicitly using localhost
 			if ip.IsLoopback() && isLocalhost {
@@ -446,8 +453,10 @@ func isPrivateIP(ip net.IP) bool {
 		{mustParseCIDR("192.168.0.0/16")},
 		{mustParseCIDR("169.254.0.0/16")},
 		{mustParseCIDR("127.0.0.0/8")},
-		{mustParseCIDR("::1/128")},
 		{mustParseCIDR("0.0.0.0/32")},
+		{mustParseCIDR("::1/128")},
+		{mustParseCIDR("fc00::/7")},  // IPv6 ULA (RFC 4193)
+		{mustParseCIDR("fe80::/10")}, // IPv6 link-local
 	}
 
 	for _, r := range privateRanges {

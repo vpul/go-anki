@@ -55,6 +55,9 @@ func validateNote(note goanki.NewNote) error {
 		if strings.ContainsRune(tag, 0) {
 			return fmt.Errorf("invalid note: tag contains null byte")
 		}
+		if strings.ContainsAny(tag, " \t\r\n") {
+			return fmt.Errorf("invalid note: tag %q contains whitespace", tag)
+		}
 	}
 	return nil
 }

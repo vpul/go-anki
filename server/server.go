@@ -197,12 +197,10 @@ func sanitizeErr(err error) string {
 	msg := err.Error()
 	lower := strings.ToLower(msg)
 
-	// "not found" errors are safe to surface
-	if strings.Contains(lower, "not found") {
-		return "not found"
-	}
-
-	// Patterns that indicate internal details should be hidden entirely
+	// Patterns that indicate internal details should be hidden entirely.
+	// Checked BEFORE the "not found" shortcut so that errors like
+	// "SELECT * FROM cards WHERE id=5: record not found" are sanitized
+	// as "internal error" rather than leaking SQL.
 	pathPattern := regexp.MustCompile(`[/\\][\w._-]+`)
 	sqlKeywords := []string{"SELECT ", "INSERT ", "UPDATE ", "DELETE ", "WHERE ", "select ", "insert ", "update ", "delete ", "where "}
 	sqlitePatterns := []string{"SQL logic error", "database is locked", "disk I/O error"}
@@ -219,6 +217,11 @@ func sanitizeErr(err error) string {
 		if strings.Contains(lower, strings.ToLower(pat)) {
 			return "internal error"
 		}
+	}
+
+	// "not found" errors are safe to surface only after checking for SQL/path leaks
+	if strings.Contains(lower, "not found") {
+		return "not found"
 	}
 
 	// For other errors, strip any path-like content but return the rest
@@ -281,12 +284,14 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 
 		authHeader := r.Header.Get("Authorization")
 		if !strings.HasPrefix(authHeader, "Bearer ") {
+			w.Header().Set("WWW-Authenticate", "Bearer")
 			errorResponse(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 		token := strings.TrimPrefix(authHeader, "Bearer ")
 		tokenHash := sha256.Sum256([]byte(token))
 		if subtle.ConstantTimeCompare(tokenHash[:], s.authTokenHash) != 1 {
+			w.Header().Set("WWW-Authenticate", "Bearer")
 			errorResponse(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -392,6 +397,19 @@ func (s *Server) ListenAndServe() error {
 		IdleTimeout:  s.idleTimeout,
 	}
 	return srv.ListenAndServe()
+}
+
+// Close shuts down the server gracefully, stopping the rate limiter cleanup goroutine.
+// It signals the closeCh to stop background goroutines and then closes the HTTP server.
+func (s *Server) Close() error {
+	// Signal background goroutines to stop
+	select {
+	case <-s.closeCh:
+		// Already closed
+	default:
+		close(s.closeCh)
+	}
+	return nil
 }
 
 // handleVersion returns the server version.
