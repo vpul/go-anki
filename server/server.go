@@ -4,7 +4,6 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -234,7 +233,11 @@ func (s *Server) handleAnswer(col *collection.Collection, w http.ResponseWriter,
 
 	answer, err := col.AnswerCard(req.CardID, rating, s.scheduler)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("answer card: %v", err))
+		if errors.Is(err, collection.ErrNotFound) {
+			errorResponse(w, http.StatusNotFound, fmt.Sprintf("card %d not found", req.CardID))
+		} else {
+			errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("answer card: %v", err))
+		}
 		return
 	}
 	jsonResponse(w, map[string]interface{}{
@@ -315,14 +318,14 @@ func (s *Server) handleAddNote(col *collection.Collection, w http.ResponseWriter
 }
 
 // handleSyncDownload performs a full download from AnkiWeb.
-func (s *Server) handleSyncDownload(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleSyncDownload(w http.ResponseWriter, r *http.Request) {
 	if s.syncConfig == nil {
 		errorResponse(w, http.StatusBadRequest, "sync not configured: set SyncConfig")
 		return
 	}
 
 	client := sync.NewClient(*s.syncConfig)
-	ctx := context.Background()
+	ctx := r.Context()
 
 	if err := client.Authenticate(ctx); err != nil {
 		errorResponse(w, http.StatusUnauthorized, fmt.Sprintf("authenticate: %v", err))
@@ -358,14 +361,14 @@ func (s *Server) handleSyncDownload(w http.ResponseWriter, _ *http.Request) {
 }
 
 // handleSyncUpload performs a full upload to AnkiWeb.
-func (s *Server) handleSyncUpload(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleSyncUpload(w http.ResponseWriter, r *http.Request) {
 	if s.syncConfig == nil {
 		errorResponse(w, http.StatusBadRequest, "sync not configured: set SyncConfig")
 		return
 	}
 
 	client := sync.NewClient(*s.syncConfig)
-	ctx := context.Background()
+	ctx := r.Context()
 
 	if err := client.Authenticate(ctx); err != nil {
 		errorResponse(w, http.StatusUnauthorized, fmt.Sprintf("authenticate: %v", err))
