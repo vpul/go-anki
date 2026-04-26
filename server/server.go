@@ -364,6 +364,14 @@ func (s *Server) Handler() http.Handler {
 // ListenAndServe starts the HTTP server on the configured port.
 func (s *Server) ListenAndServe() error {
 	addr := fmt.Sprintf(":%d", s.port)
+
+	// Warn if running without auth or TLS
+	if len(s.authTokenHash) == 0 {
+		log.Printf("WARNING: No auth token configured — all endpoints are publicly accessible.")
+		log.Printf("         Set auth token via WithAuthToken() or --auth-token flag.")
+	}
+	log.Printf("WARNING: Server is running without TLS. For production use, run behind a TLS-terminating proxy (nginx, Caddy, etc.).")
+
 	log.Printf("go-anki server listening on %s", addr)
 
 	// Start rate limiter cleanup goroutine if rate limiting is enabled

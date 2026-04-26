@@ -410,11 +410,26 @@ func fieldChecksum(field string) string {
 	return fmt.Sprintf("%08x", checksum)
 }
 
-// randInt generates a cryptographically random non-negative integer.
+// randInt generates a cryptographically random non-negative integer in [0, max).
+// Uses rejection sampling to avoid modulo bias, matching the approach used in
+// generateGUID.
 func randInt(max int) int {
+	if max <= 0 {
+		return 0
+	}
+	// Compute the largest multiple of max that fits in uint32.
+	// Any random value >= threshold would create bias when reduced modulo max,
+	// so we reject those values and try again.
+	threshold := uint32(0xFFFFFFFF-uint32(max)) + 1
+	threshold -= threshold % uint32(max)
 	b := make([]byte, 4)
-	_, _ = rand.Read(b)
-	return int(binary.BigEndian.Uint32(b) % uint32(max))
+	for {
+		_, _ = rand.Read(b)
+		v := binary.BigEndian.Uint32(b)
+		if v < threshold {
+			return int(v % uint32(max))
+		}
+	}
 }
 
 // Scheduler interface for the AnswerCard method.

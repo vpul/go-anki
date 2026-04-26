@@ -217,6 +217,8 @@ func (c *Collection) getModelsV18() (map[int64]goanki.Model, error) {
 	return models, nil
 }
 
+const maxProtobufFieldLen = 10 << 20 // 10MB max per protobuf length-delimited field
+
 // parseTemplateConfig decodes a v18 template config protobuf blob to extract
 // the question format (qfmt) and answer format (afmt) strings.
 // The protobuf structure is:
@@ -246,7 +248,7 @@ func parseTemplateConfig(data []byte) (qfmt, afmt string) {
 			data = data[8:]
 		case 2: // length-delimited
 			length, n := decodeVarint(data)
-			if n <= 0 || int(length) > len(data[n:]) {
+			if n <= 0 || int(length) > len(data[n:]) || int(length) > maxProtobufFieldLen {
 				break
 			}
 			data = data[n:]
@@ -312,7 +314,7 @@ func parseNotetypeConfig(data []byte, m goanki.Model) goanki.Model {
 			data = data[8:]
 		case 2: // length-delimited
 			length, n := decodeVarint(data)
-			if n <= 0 || int(length) > len(data[n:]) {
+			if n <= 0 || int(length) > len(data[n:]) || int(length) > maxProtobufFieldLen {
 				break
 			}
 			data = data[n:]

@@ -169,6 +169,9 @@ func TestMetaSuccess(t *testing.T) {
 		Username: "test@example.com",
 		Password: "secret",
 	}, server.URL+"/sync/")
+	if err != nil {
+		t.Fatalf("NewClientWithURL: %v", err)
+	}
 
 	if err := client.Authenticate(context.Background()); err != nil {
 		t.Fatalf("Authenticate: %v", err)
@@ -409,6 +412,9 @@ func TestFullDownloadSuccess(t *testing.T) {
 		Username: "test@example.com",
 		Password: "secret",
 	}, server.URL+"/sync/")
+	if err != nil {
+		t.Fatalf("NewClientWithURL: %v", err)
+	}
 
 	if err := client.Authenticate(context.Background()); err != nil {
 		t.Fatalf("Authenticate: %v", err)
@@ -465,6 +471,9 @@ func TestFullDownloadMediaRelocation(t *testing.T) {
 		Username: "test@example.com",
 		Password: "secret",
 	}, server.URL+"/sync/")
+	if err != nil {
+		t.Fatalf("NewClientWithURL: %v", err)
+	}
 
 	if err := client.Authenticate(context.Background()); err != nil {
 		t.Fatalf("Authenticate: %v", err)

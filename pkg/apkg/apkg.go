@@ -409,27 +409,6 @@ func validateMediaFilename(name string) error {
 	return nil
 }
 
-// extractZipFile extracts a single file from a ZIP archive to disk.
-func extractZipFile(file *zip.File, destPath string) error {
-	rc, err := file.Open()
-	if err != nil {
-		return fmt.Errorf("open zip entry %s: %w", file.Name, err)
-	}
-	defer func() { _ = rc.Close() }()
-
-	outFile, err := os.Create(destPath)
-	if err != nil {
-		return fmt.Errorf("create file %s: %w", destPath, err)
-	}
-	defer func() { _ = outFile.Close() }()
-
-	if _, err := io.Copy(outFile, rc); err != nil {
-		return fmt.Errorf("write file %s: %w", destPath, err)
-	}
-
-	return nil
-}
-
 // extractZipFileWithLimit extracts a single file from a ZIP archive to disk,
 // enforcing a maximum decompressed size. Returns the number of bytes written.
 func extractZipFileWithLimit(file *zip.File, destPath string, maxSize int64) (int64, error) {
@@ -465,35 +444,6 @@ func extractZipFileWithLimit(file *zip.File, destPath string, maxSize int64) (in
 	}
 
 	return written, nil
-}
-
-// extractZstdZipFile extracts a Zstandard-compressed file from a ZIP archive
-// and decompresses it to disk.
-func extractZstdZipFile(file *zip.File, destPath string) error {
-	rc, err := file.Open()
-	if err != nil {
-		return fmt.Errorf("open zip entry %s: %w", file.Name, err)
-	}
-	defer func() { _ = rc.Close() }()
-
-	// Read compressed data
-	compressed, err := io.ReadAll(rc)
-	if err != nil {
-		return fmt.Errorf("read zip entry %s: %w", file.Name, err)
-	}
-
-	// Decompress using Zstandard
-	decompressed, err := decompressZstd(compressed)
-	if err != nil {
-		return fmt.Errorf("decompress %s: %w", file.Name, err)
-	}
-
-	// Write decompressed data
-	if err := os.WriteFile(destPath, decompressed, 0644); err != nil {
-		return fmt.Errorf("write file %s: %w", destPath, err)
-	}
-
-	return nil
 }
 
 // extractZstdZipFileWithLimit extracts a Zstandard-compressed file from a ZIP archive,
