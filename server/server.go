@@ -12,12 +12,18 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	goanki "github.com/vpul/go-anki/pkg/types"
 
 	"github.com/vpul/go-anki/pkg/collection"
 	"github.com/vpul/go-anki/pkg/scheduler"
 	"github.com/vpul/go-anki/pkg/sync"
+)
+
+const (
+	// maxBodyBytes is the maximum allowed request body size (1MB).
+	maxBodyBytes int64 = 1 << 20
 )
 
 // ServerOption is a functional option for configuring a Server.
@@ -51,21 +57,36 @@ func WithScheduler(sched collection.Scheduler) ServerOption {
 	}
 }
 
+// WithServerTimeouts sets the HTTP server timeouts.
+func WithServerTimeouts(read, write, idle time.Duration) ServerOption {
+	return func(s *Server) {
+		s.readTimeout = read
+		s.writeTimeout = write
+		s.idleTimeout = idle
+	}
+}
+
 // Server is an HTTP API server wrapping go-anki collection operations.
 type Server struct {
-	dbPath     string
-	mediaDir   string
-	syncConfig *goanki.SyncConfig
-	port       int
-	scheduler  collection.Scheduler
+	dbPath      string
+	mediaDir    string
+	syncConfig  *goanki.SyncConfig
+	port        int
+	scheduler   collection.Scheduler
+	readTimeout time.Duration
+	writeTimeout time.Duration
+	idleTimeout time.Duration
 }
 
 // NewServer creates a new Server with the given database path and options.
 func NewServer(dbPath string, opts ...ServerOption) *Server {
 	s := &Server{
-		dbPath:    dbPath,
-		port:      8765,
-		scheduler: scheduler.NewFSRSScheduler(),
+		dbPath:       dbPath,
+		port:         8765,
+		scheduler:    scheduler.NewFSRSScheduler(),
+		readTimeout:  5 * time.Second,
+		writeTimeout: 10 * time.Second,
+		idleTimeout:  60 * time.Second,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -136,6 +157,16 @@ func (s *Server) withMode(mode collection.OpenMode, fn func(col *collection.Coll
 	}
 }
 
+// maxBodySize is middleware that limits the request body size for all requests.
+func maxBodySize(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // Handler returns an http.Handler with all API routes registered.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -156,14 +187,21 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/sync/download", s.handleSyncDownload)
 	mux.HandleFunc("POST /api/v1/sync/upload", s.handleSyncUpload)
 
-	return mux
+	return maxBodySize(mux)
 }
 
 // ListenAndServe starts the HTTP server on the configured port.
 func (s *Server) ListenAndServe() error {
 	addr := fmt.Sprintf(":%d", s.port)
 	log.Printf("go-anki server listening on %s", addr)
-	return http.ListenAndServe(addr, s.Handler())
+	srv := &http.Server{
+		Addr:         addr,
+		Handler:      s.Handler(),
+		ReadTimeout:  s.readTimeout,
+		WriteTimeout: s.writeTimeout,
+		IdleTimeout:  s.idleTimeout,
+	}
+	return srv.ListenAndServe()
 }
 
 // handleVersion returns the server version.
