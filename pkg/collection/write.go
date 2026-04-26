@@ -32,7 +32,7 @@ func (c *Collection) AnswerCard(cardID int64, rating goanki.Rating, scheduler Sc
 	if err != nil {
 		return nil, fmt.Errorf("begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Update the card
 	_, err = tx.Exec(`
@@ -53,7 +53,7 @@ func (c *Collection) AnswerCard(cardID int64, rating goanki.Rating, scheduler Sc
 	// Update FSRS fields if present (Anki 23.12+ schema)
 	if answer.Card.Stability != nil && answer.Card.Difficulty != nil {
 		// Try to update FSRS columns — ignore error if they don't exist (older schema)
-		tx.Exec(`UPDATE cards SET stability = ?, difficulty = ? WHERE id = ?`,
+		_, _ = tx.Exec(`UPDATE cards SET stability = ?, difficulty = ? WHERE id = ?`,
 			*answer.Card.Stability, *answer.Card.Difficulty, answer.Card.ID)
 	}
 
@@ -185,7 +185,7 @@ func (c *Collection) AddNote(input goanki.NewNote) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	now := time.Now().Unix()
 	noteID := now*1000 + int64(randInt(1000))
@@ -252,7 +252,7 @@ func (c *Collection) AddNote(input goanki.NewNote) (int64, error) {
 // dayOffsetSinceCreation returns the number of days since the collection was created.
 func dayOffsetSinceCreation(c *Collection) int64 {
 	var crt int64
-	c.db.QueryRow("SELECT crt FROM col").Scan(&crt)
+	_ = c.db.QueryRow("SELECT crt FROM col").Scan(&crt)
 	if crt == 0 {
 		return time.Now().Unix() / 86400
 	}
@@ -263,7 +263,7 @@ func dayOffsetSinceCreation(c *Collection) int64 {
 func generateGUID() string {
 	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	b := make([]byte, 10)
-	rand.Read(b)
+	_, _ = rand.Read(b)
 	for i := range b {
 		b[i] = chars[b[i]%byte(len(chars))]
 	}
@@ -279,17 +279,10 @@ func fieldChecksum(field string) string {
 	return fmt.Sprintf("%08x", checksum)
 }
 
-// fieldChecksumInt computes the field checksum as an integer (for DB csum field).
-func fieldChecksumInt(field string) int64 {
-	stripped := strings.TrimSpace(field)
-	checksum := crc32.ChecksumIEEE([]byte(stripped))
-	return int64(checksum)
-}
-
 // randInt generates a cryptographically random non-negative integer.
 func randInt(max int) int {
 	b := make([]byte, 4)
-	rand.Read(b)
+	_, _ = rand.Read(b)
 	return int(binary.BigEndian.Uint32(b) % uint32(max))
 }
 

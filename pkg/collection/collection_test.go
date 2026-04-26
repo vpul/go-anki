@@ -158,7 +158,7 @@ func createTestDBWithMode(t *testing.T, mode OpenMode) (*Collection, string) {
 
 func TestOpenCollection(t *testing.T) {
 	col, _ := createTestDB(t)
-	defer col.Close()
+	defer func() { _ = col.Close() }()
 	if col.Path() == "" {
 		t.Error("expected non-empty path")
 	}
@@ -166,7 +166,7 @@ func TestOpenCollection(t *testing.T) {
 
 func TestGetDecks(t *testing.T) {
 	col, _ := createTestDB(t)
-	defer col.Close()
+	defer func() { _ = col.Close() }()
 	decks, err := col.GetDecks()
 	if err != nil {
 		t.Fatalf("GetDecks: %v", err)
@@ -178,7 +178,7 @@ func TestGetDecks(t *testing.T) {
 
 func TestGetModels(t *testing.T) {
 	col, _ := createTestDB(t)
-	defer col.Close()
+	defer func() { _ = col.Close() }()
 	models, err := col.GetModels()
 	if err != nil {
 		t.Fatalf("GetModels: %v", err)
@@ -190,7 +190,7 @@ func TestGetModels(t *testing.T) {
 
 func TestGetDueCards(t *testing.T) {
 	col, _ := createTestDB(t)
-	defer col.Close()
+	defer func() { _ = col.Close() }()
 	cards, err := col.GetDueCards(goanki.DueCardsFilter{})
 	if err != nil {
 		t.Fatalf("GetDueCards: %v", err)
@@ -202,7 +202,7 @@ func TestGetDueCards(t *testing.T) {
 
 func TestGetDeckByName(t *testing.T) {
 	col, _ := createTestDB(t)
-	defer col.Close()
+	defer func() { _ = col.Close() }()
 	_, err := col.GetDeckByName("Default")
 	if err != nil {
 		t.Fatalf("GetDeckByName: %v", err)
@@ -215,7 +215,7 @@ func TestGetDeckByName(t *testing.T) {
 
 func TestGetStats(t *testing.T) {
 	col, _ := createTestDB(t)
-	defer col.Close()
+	defer func() { _ = col.Close() }()
 	stats, err := col.GetStats()
 	if err != nil {
 		t.Fatalf("GetStats: %v", err)
@@ -229,7 +229,7 @@ func TestGetStats(t *testing.T) {
 
 func TestCreateDeck(t *testing.T) {
 	col, _ := createReadWriteTestDB(t)
-	defer col.Close()
+	defer func() { _ = col.Close() }()
 
 	deckID, err := col.CreateDeck("Test Deck")
 	if err != nil {
@@ -259,7 +259,7 @@ func TestCreateDeck(t *testing.T) {
 
 func TestAddNote(t *testing.T) {
 	col, _ := createReadWriteTestDB(t)
-	defer col.Close()
+	defer func() { _ = col.Close() }()
 
 	noteID, err := col.AddNote(goanki.NewNote{
 		DeckName:  "Default",
@@ -300,7 +300,7 @@ func TestAddNote(t *testing.T) {
 
 func TestUpdateCard(t *testing.T) {
 	col, _ := createReadWriteTestDB(t)
-	defer col.Close()
+	defer func() { _ = col.Close() }()
 
 	cards, err := col.GetDueCards(goanki.DueCardsFilter{})
 	if err != nil {
@@ -334,7 +334,7 @@ func TestUpdateCard(t *testing.T) {
 
 func TestInsertReviewLog(t *testing.T) {
 	col, _ := createReadWriteTestDB(t)
-	defer col.Close()
+	defer func() { _ = col.Close() }()
 
 	cards, err := col.GetDueCards(goanki.DueCardsFilter{})
 	if err != nil {
