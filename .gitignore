@@ -6,10 +6,11 @@
 *.dylib
 
 # Test binary
-*.test
-
-# Output of go coverage
-*.out
+*.test  #
+Output
+of
+go
+coverage *.out
 
 # Go workspace file
 go.work
@@ -17,8 +18,7 @@ go.work
 # IDE
 .idea/
 .vscode/
-*.swp
-*.swo
+*.swp *.swo
 
 # OS
 .DS_Store
@@ -28,3 +28,6 @@ Thumbs.db
 *.anki2
 *.anki21b
 *.colpkg
+
+# Built binary
+anki-go

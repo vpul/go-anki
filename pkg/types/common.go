@@ -50,7 +50,7 @@ type ReviewLog struct {
 	USN     int       `json:"usn" db:"usn"`     // Update sequence number
 	Ease    Rating    `json:"ease" db:"ease"`   // 1=Again, 2=Hard, 3=Good, 4=Easy
 	IVL     int       `json:"ivl" db:"ivl"`     // Interval
-	LastIVL int       `json:"last_ivl" db:"last_ivl"` // Previous interval
+	LastIVL int       `json:"last_ivl" db:"lastIvl"` // Previous interval
 	Factor  int       `json:"factor" db:"factor"`    // Ease factor
 	Time    int       `json:"time" db:"time"`   // Time taken in ms
 	Type    CardType  `json:"type" db:"type"`   // Card type at review time

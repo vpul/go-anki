@@ -84,7 +84,7 @@ func createTestDB(t *testing.T) string {
 		usn   INTEGER NOT NULL,
 		ease  INTEGER NOT NULL,
 		ivl   INTEGER NOT NULL,
-		last_ivl INTEGER NOT NULL,
+		lastIvl INTEGER NOT NULL,
 		factor INTEGER NOT NULL,
 		time  INTEGER NOT NULL,
 		type  INTEGER NOT NULL

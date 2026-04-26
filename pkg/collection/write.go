@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
+	"log"
 	"strings"
 	"time"
 
@@ -59,7 +60,7 @@ func (c *Collection) AnswerCard(cardID int64, rating goanki.Rating, scheduler Sc
 
 	// Insert review log
 	_, err = tx.Exec(`
-		INSERT INTO revlog (id, cid, usn, ease, ivl, last_ivl, factor, time, type)
+		INSERT INTO revlog (id, cid, usn, ease, ivl, lastIvl, factor, time, type)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		answer.Review.ID, answer.Review.CID, answer.Review.USN, int(answer.Review.Ease),
 		answer.Review.IVL, answer.Review.LastIVL, answer.Review.Factor,
@@ -99,10 +100,10 @@ func (c *Collection) UpdateCard(card goanki.Card) error {
 // InsertReviewLog adds a review entry to the revlog table.
 func (c *Collection) InsertReviewLog(review goanki.ReviewLog) error {
 	_, err := c.db.Exec(`
-		INSERT INTO revlog (id, cid, usn, ease, ivl, last_ivl, factor, time, type)
+INSERT INTO revlog (id, cid, usn, ease, ivl, lastIvl, factor, time, type)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		review.ID, review.CID, review.USN, int(review.Ease),
-		review.IVL, review.LastIVL, review.Factor, review.Time, int(review.Type),
+	review.ID, review.CID, review.USN, int(review.Ease),
+	review.IVL, review.LastIVL, review.Factor, review.Time, int(review.Type),
 	)
 	if err != nil {
 		return fmt.Errorf("insert review log: %w", err)
@@ -128,26 +129,58 @@ func (c *Collection) CreateDeck(name string) (int64, error) {
 	now := time.Now().Unix()
 	id := now*1000 + int64(randInt(1000)) // Anki-style: timestamp_ms + random offset
 
-	newDeck := goanki.Deck{
-		ID:    id,
-		Name:  name,
-		Mtime: now,
-		USN:   -1,
-		Dyn:   0, // Regular deck (not filtered)
-		Conf:  1, // Default deck config
-	}
+	if c.isV18Plus() {
+		// v18+: Insert into separate decks table with protobuf blobs
+		// Regular deck common blob: 08011001 (field 1=1, field 2=1)
+		// Regular deck kind blob: 0a020801 (field 1=bytes{0801})
+		commonBlob := []byte{0x08, 0x01, 0x10, 0x01} // study_mode=1, new_cards_order=1
+		kindBlob := []byte{0x0a, 0x02, 0x08, 0x01}   // regular deck
 
-	decks[id] = newDeck
+		_, err = c.db.Exec(
+			"INSERT INTO decks (id, name, mtime_secs, usn, common, kind) VALUES (?, ?, ?, ?, ?, ?)",
+			id, name, now, -1, commonBlob, kindBlob,
+		)
+		if err != nil {
+			return 0, fmt.Errorf("insert deck into decks table: %w", err)
+		}
 
-	// Serialize back to JSON and update col table
-	decksJSON, err := goanki.MarshalDecksJSON(decks)
-	if err != nil {
-		return 0, fmt.Errorf("serialize decks: %w", err)
-	}
+		// Also create deck_config for the new deck
+		// Default deck config: minimal protobuf
+		configID := id
+		configBlob := []byte{} // Minimal config, Anki will fill defaults
+		_, err = c.db.Exec(
+			"INSERT OR IGNORE INTO deck_config (id, name, mtime_secs, usn, config) VALUES (?, ?, ?, ?, ?)",
+			configID, name, now, -1, configBlob,
+		)
+		if err != nil {
+			// Non-fatal: INSERT OR IGNORE already handles duplicates, so any error
+			// here indicates a schema mismatch or write failure worth reporting.
+			// We don't fail the whole operation since the deck itself was created.
+			log.Printf("warning: failed to create deck_config for deck %d: %v", id, err)
+		}
+	} else {
+		// v11: Update JSON blob in col table
+		newDeck := goanki.Deck{
+			ID:    id,
+			Name:  name,
+			Mtime: now,
+			USN:   -1,
+			Dyn:   0, // Regular deck (not filtered)
+			Conf:  1, // Default deck config
+		}
 
-	_, err = c.db.Exec("UPDATE col SET decks = ?, mod = ?, usn = -1", string(decksJSON), now)
-	if err != nil {
-		return 0, fmt.Errorf("update decks in col: %w", err)
+		decks[id] = newDeck
+
+		// Serialize back to JSON and update col table
+		decksJSON, err := goanki.MarshalDecksJSON(decks)
+		if err != nil {
+			return 0, fmt.Errorf("serialize decks: %w", err)
+		}
+
+		_, err = c.db.Exec("UPDATE col SET decks = ?, mod = ?, usn = -1", string(decksJSON), now)
+		if err != nil {
+			return 0, fmt.Errorf("update decks in col: %w", err)
+		}
 	}
 
 	return id, nil
@@ -215,12 +248,24 @@ func (c *Collection) AddNote(input goanki.NewNote) (int64, error) {
 
 	// Insert note
 	guid := generateGUID()
-	_, err = tx.Exec(`
-		INSERT INTO notes (id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		noteID, guid, model.ID, now, -1, tags,
-		strings.Join(fieldValues, "\x1f"), sfld, csum, 0, "",
-	)
+	if c.isV18Plus() {
+		// In v18+, sfld and csum are INTEGER columns. We store the CRC32 checksum
+		// as an integer (which is what Anki does in v18+).
+		csumInt := int64(crc32.ChecksumIEEE([]byte(strings.TrimSpace(sfld))))
+		_, err = tx.Exec(`
+			INSERT INTO notes (id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			noteID, guid, model.ID, now, -1, tags,
+			strings.Join(fieldValues, "\x1f"), sfld, csumInt, 0, "",
+		)
+	} else {
+		_, err = tx.Exec(`
+			INSERT INTO notes (id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			noteID, guid, model.ID, now, -1, tags,
+			strings.Join(fieldValues, "\x1f"), sfld, csum, 0, "",
+		)
+	}
 	if err != nil {
 		return 0, fmt.Errorf("insert note: %w", err)
 	}
