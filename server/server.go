@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"strconv"
+	"strings"
 
 	goanki "github.com/vpul/go-anki/pkg/types"
 
@@ -71,6 +73,42 @@ func NewServer(dbPath string, opts ...ServerOption) *Server {
 	return s
 }
 
+//sanitizeErr sanitizes error messages for 500 status responses.
+// It removes internal details like file paths, SQL keywords, and
+// SQLite error patterns that should not be exposed to clients.
+func sanitizeErr(err error) string {
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+
+	// "not found" errors are safe to surface
+	if strings.Contains(lower, "not found") {
+		return "not found"
+	}
+
+	// Patterns that indicate internal details should be hidden entirely
+	pathPattern := regexp.MustCompile(`[/\\][\w._-]+`)
+	sqlKeywords := []string{"SELECT ", "INSERT ", "UPDATE ", "DELETE ", "WHERE ", "select ", "insert ", "update ", "delete ", "where "}
+	sqlitePatterns := []string{"SQL logic error", "database is locked", "disk I/O error"}
+
+	if pathPattern.MatchString(msg) {
+		return "internal error"
+	}
+	for _, kw := range sqlKeywords {
+		if strings.Contains(msg, kw) {
+			return "internal error"
+		}
+	}
+	for _, pat := range sqlitePatterns {
+		if strings.Contains(lower, strings.ToLower(pat)) {
+			return "internal error"
+		}
+	}
+
+	// For other errors, strip any path-like content but return the rest
+	sanitized := pathPattern.ReplaceAllString(msg, "[redacted]")
+	return sanitized
+}
+
 // errorResponse writes a JSON error response with the given status code.
 func errorResponse(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
@@ -90,7 +128,7 @@ func (s *Server) withMode(mode collection.OpenMode, fn func(col *collection.Coll
 	return func(w http.ResponseWriter, r *http.Request) {
 		col, err := collection.Open(s.dbPath, mode)
 		if err != nil {
-			errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("open collection: %v", err))
+			errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 			return
 		}
 		defer func() { _ = col.Close() }()
@@ -137,7 +175,7 @@ func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleGetDecks(col *collection.Collection, w http.ResponseWriter, _ *http.Request) {
 	decks, err := col.GetDecks()
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("get decks: %v", err))
+		errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 		return
 	}
 	// Convert map to slice for JSON array response
@@ -165,7 +203,7 @@ func (s *Server) handleGetDueCards(col *collection.Collection, w http.ResponseWr
 
 	cards, err := col.GetDueCards(filter)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("get due cards: %v", err))
+		errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 		return
 	}
 	jsonResponse(w, map[string]interface{}{"cards": cards})
@@ -175,7 +213,7 @@ func (s *Server) handleGetDueCards(col *collection.Collection, w http.ResponseWr
 func (s *Server) handleGetStats(col *collection.Collection, w http.ResponseWriter, _ *http.Request) {
 	stats, err := col.GetStats()
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("get stats: %v", err))
+		errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 		return
 	}
 	jsonResponse(w, map[string]interface{}{"stats": stats})
@@ -195,7 +233,7 @@ func (s *Server) handleGetCardByID(col *collection.Collection, w http.ResponseWr
 		if errors.Is(err, collection.ErrNotFound) {
 			errorResponse(w, http.StatusNotFound, fmt.Sprintf("card %d not found", id))
 		} else {
-			errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("get card: %v", err))
+			errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 		}
 		return
 	}
@@ -236,7 +274,7 @@ func (s *Server) handleAnswer(col *collection.Collection, w http.ResponseWriter,
 		if errors.Is(err, collection.ErrNotFound) {
 			errorResponse(w, http.StatusNotFound, fmt.Sprintf("card %d not found", req.CardID))
 		} else {
-			errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("answer card: %v", err))
+			errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 		}
 		return
 	}
@@ -266,7 +304,7 @@ func (s *Server) handleCreateDeck(col *collection.Collection, w http.ResponseWri
 
 	deckID, err := col.CreateDeck(req.Name)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("create deck: %v", err))
+		errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 		return
 	}
 	jsonResponse(w, map[string]interface{}{"deck_id": deckID})
@@ -311,7 +349,7 @@ func (s *Server) handleAddNote(col *collection.Collection, w http.ResponseWriter
 
 	noteID, err := col.AddNote(input)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("add note: %v", err))
+		errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 		return
 	}
 	jsonResponse(w, map[string]interface{}{"note_id": noteID})
@@ -334,7 +372,7 @@ func (s *Server) handleSyncDownload(w http.ResponseWriter, r *http.Request) {
 
 	result, err := client.FullDownload(ctx, s.dbPath, s.mediaDir)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("download: %v", err))
+		errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 		return
 	}
 
@@ -376,7 +414,7 @@ func (s *Server) handleSyncUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := client.FullUpload(ctx, s.dbPath, s.mediaDir); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("upload: %v", err))
+		errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 		return
 	}
 
