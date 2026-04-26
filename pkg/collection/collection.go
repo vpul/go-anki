@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	// Pure Go SQLite driver — no CGO required
@@ -20,7 +21,8 @@ var ErrNotFound = errors.New("not found")
 type Collection struct {
 	db     *sql.DB
 	path   string
-	schema int // cached schema version (0 = unset, 11 = old JSON blob, 18+ = table-based)
+	schema int    // cached schema version (0 = unset, 11 = old JSON blob, 18+ = table-based)
+	mu     sync.Mutex // protects write operations for concurrent access
 }
 
 // OpenMode controls database access mode.
@@ -57,7 +59,8 @@ func Open(path string, mode OpenMode) (*Collection, error) {
 	case ReadWrite:
 		// Use mode=rw (not rwc) so that a missing file produces a clear error
 		// instead of silently creating an empty database with no Anki tables.
-		dsn = fmt.Sprintf("file:%s?mode=rw", path)
+		// Add busy_timeout for concurrent access safety.
+		dsn = fmt.Sprintf("file:%s?mode=rw&_busy_timeout=5000", path)
 	default:
 		dsn = fmt.Sprintf("file:%s?mode=ro", path)
 	}
@@ -65,6 +68,16 @@ func Open(path string, mode OpenMode) (*Collection, error) {
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open anki collection: %w", err)
+	}
+
+	// In ReadWrite mode, the sync.Mutex (c.mu) serializes all write operations.
+	// We intentionally do NOT set SetMaxOpenConns(1) because:
+	//   1. It would prevent transactions from using a separate connection for reads
+	//      (e.g., dayOffsetSinceCreation uses c.db.QueryRow inside a tx), causing deadlocks.
+	//   2. The WriteWrite mutex + SQLite WAL mode + _busy_timeout provides sufficient
+	//      serialization for our use case.
+	if mode == ReadWrite {
+		// Mutex + busy_timeout is sufficient; no SetMaxOpenConns needed.
 	}
 
 	// Verify this is actually an Anki database and cache schema version

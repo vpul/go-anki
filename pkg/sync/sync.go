@@ -44,6 +44,14 @@ import (
 )
 
 const (
+	// maxDownloadSize is the maximum size (500MB) of a response body from AnkiWeb.
+	maxDownloadSize int64 = 500 * 1024 * 1024
+
+	// downloadTimeout is the overall timeout for download operations.
+	downloadTimeout = 5 * time.Minute
+)
+
+const (
 	// DefaultSyncURL is the default AnkiWeb sync server URL.
 	DefaultSyncURL = "https://sync.ankiweb.net/sync/"
 
@@ -239,6 +247,10 @@ func (c *Client) FullDownload(ctx context.Context, dbPath string, mediaDir strin
 		return nil, fmt.Errorf("not authenticated; call Authenticate() first")
 	}
 
+	// Apply overall download timeout
+	dlCtx, cancel := context.WithTimeout(ctx, downloadTimeout)
+	defer cancel()
+
 	// Create temporary file for the downloaded .colpkg
 	tmpDir, err := os.MkdirTemp("", "anki-sync-download-*")
 	if err != nil {
@@ -261,7 +273,7 @@ func (c *Client) FullDownload(ctx context.Context, dbPath string, mediaDir strin
 		return nil, fmt.Errorf("marshal download request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, syncURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(dlCtx, http.MethodPost, syncURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create download request: %w", err)
 	}
@@ -288,17 +300,25 @@ func (c *Client) FullDownload(ctx context.Context, dbPath string, mediaDir strin
 		usn, _ = strconv.Atoi(v)
 	}
 
+	// Wrap the response body with a LimitedReader to enforce max download size
+	limitedReader := &io.LimitedReader{R: resp.Body, N: maxDownloadSize}
+
 	// Save the .colpkg to temp file
 	colpkgFile, err := os.Create(colpkgPath)
 	if err != nil {
 		return nil, fmt.Errorf("create temp colpkg file: %w", err)
 	}
 
-	if _, err := io.Copy(colpkgFile, resp.Body); err != nil {
+	if _, err := io.Copy(colpkgFile, limitedReader); err != nil {
 		_ = colpkgFile.Close()
 		return nil, fmt.Errorf("save downloaded colpkg: %w", err)
 	}
 	_ = colpkgFile.Close()
+
+	// Check if we hit the download size limit
+	if limitedReader.N <= 0 {
+		return nil, fmt.Errorf("download exceeded maximum size of %d bytes", maxDownloadSize)
+	}
 
 	// Extract the .colpkg using the existing ImportColpkg function
 	result, err := goanki.ImportColpkg(colpkgPath, filepath.Dir(dbPath))
