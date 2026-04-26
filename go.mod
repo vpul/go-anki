@@ -3,6 +3,7 @@ module github.com/vpul/go-anki
 go 1.25.0
 
 require (
+	github.com/klauspost/compress v1.18.5
 	github.com/open-spaced-repetition/go-fsrs v1.2.1
 	modernc.org/sqlite v1.50.0
 )
