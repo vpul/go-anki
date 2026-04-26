@@ -31,6 +31,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -316,8 +317,10 @@ func (c *Client) FullDownload(ctx context.Context, dbPath string, mediaDir strin
 		usn, _ = strconv.Atoi(v)
 	}
 
-	// Wrap the response body with a LimitedReader to enforce max download size
-	limitedReader := &io.LimitedReader{R: resp.Body, N: maxDownloadSize}
+	// Wrap the response body with a LimitedReader to enforce max download size.
+	// Use maxDownloadSize+1 so we can detect responses that exceed the limit
+	// (an exact-size response should leave N=1, not N=0 which is ambiguous).
+	limitedReader := &io.LimitedReader{R: resp.Body, N: maxDownloadSize + 1}
 
 	// Save the .colpkg to temp file
 	colpkgFile, err := os.Create(colpkgPath)
@@ -332,22 +335,31 @@ func (c *Client) FullDownload(ctx context.Context, dbPath string, mediaDir strin
 	_ = colpkgFile.Close()
 
 	// Check if we hit the download size limit
-	if limitedReader.N <= 0 {
+	if limitedReader.N < 1 {
 		return nil, fmt.Errorf("download exceeded maximum size of %d bytes", maxDownloadSize)
 	}
 
-	// Extract the .colpkg using the existing ImportColpkg function
-	result, err := goanki.ImportColpkg(colpkgPath, filepath.Dir(dbPath))
+	// Extract the .colpkg using the existing ImportColpkg function.
+	// We extract to a temporary directory first, then atomically move
+	// the database file to the final location. This prevents data loss
+	// if extraction fails partway through — the original file remains intact.
+	extractDir := filepath.Join(tmpDir, "extracted")
+	if err := os.MkdirAll(extractDir, 0755); err != nil {
+		return nil, fmt.Errorf("create extraction dir: %w", err)
+	}
+
+	result, err := goanki.ImportColpkg(colpkgPath, extractDir)
 	if err != nil {
 		return nil, fmt.Errorf("import downloaded colpkg: %w", err)
 	}
 
-	// If dbPath specifies a different directory, move the extracted file
-	extractedDB := filepath.Join(filepath.Dir(dbPath), "collection.anki2")
-	if extractedDB != dbPath {
-		if err := os.Rename(extractedDB, dbPath); err != nil {
-			return nil, fmt.Errorf("rename extracted database: %w", err)
-		}
+	// Atomically move the extracted database to the final location.
+	extractedDB := filepath.Join(extractDir, "collection.anki2")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+		return nil, fmt.Errorf("create db directory: %w", err)
+	}
+	if err := renameWithCopy(extractedDB, dbPath); err != nil {
+		return nil, fmt.Errorf("move database to final location: %w", err)
 	}
 
 	// Set up media directory
@@ -359,23 +371,8 @@ func (c *Client) FullDownload(ctx context.Context, dbPath string, mediaDir strin
 	}
 
 	// Move media files from extraction dir to the specified mediaDir
-	extractedMedia := filepath.Join(filepath.Dir(dbPath), "collection.media")
-	if extractedMedia != mediaDir {
-		mediaFiles, err := os.ReadDir(extractedMedia)
-		if err != nil && !os.IsNotExist(err) {
-			return nil, fmt.Errorf("read extracted media dir: %w", err)
-		}
-		for _, f := range mediaFiles {
-			if f.IsDir() {
-				continue
-			}
-			src := filepath.Join(extractedMedia, f.Name())
-			dst := filepath.Join(mediaDir, f.Name())
-			if err := copyFile(dst, src); err != nil {
-				return nil, fmt.Errorf("copy media file %s: %w", f.Name(), err)
-			}
-		}
-	}
+	extractedMedia := filepath.Join(extractDir, "collection.media")
+	moveMediaFiles(extractedMedia, mediaDir)
 
 	return &DownloadResult{
 		ModifiedTimestamp:    modTimestamp,
@@ -486,6 +483,42 @@ func copyFile(dst, src string) error {
 		return fmt.Errorf("write destination file: %w", err)
 	}
 	return nil
+}
+
+// renameWithCopy renames src to dst, falling back to copy+delete if the
+// rename crosses filesystem boundaries (e.g., /tmp → /data).
+func renameWithCopy(src, dst string) error {
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	}
+	// Fallback: copy then delete (cross-filesystem move)
+	if err := copyFile(dst, src); err != nil {
+		return fmt.Errorf("copy: %w", err)
+	}
+	if err := os.Remove(src); err != nil {
+		// Non-fatal: the copy succeeded, just a leftover temp file
+		log.Printf("warning: failed to remove temp file %s: %v", src, err)
+	}
+	return nil
+}
+
+// moveMediaFiles moves media files from srcDir to dstDir.
+// Missing srcDir is non-fatal (no media to extract).
+func moveMediaFiles(srcDir, dstDir string) {
+	entries, err := os.ReadDir(srcDir)
+	if err != nil {
+		return // missing or unreadable source dir is non-fatal
+	}
+	for _, f := range entries {
+		if f.IsDir() {
+			continue
+		}
+		src := filepath.Join(srcDir, f.Name())
+		dst := filepath.Join(dstDir, f.Name())
+		if err := renameWithCopy(src, dst); err != nil {
+			log.Printf("warning: failed to move media file %s: %v", f.Name(), err)
+		}
+	}
 }
 
 // FullUpload uploads the full collection to AnkiWeb.

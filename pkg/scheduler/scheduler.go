@@ -1,6 +1,8 @@
 package scheduler
 
 import (
+	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"time"
 
@@ -63,7 +65,7 @@ func (s *FSRSScheduler) Answer(card goanki.Card, rating goanki.Rating, now time.
 
 	// Create review log entry
 	review := goanki.ReviewLog{
-		ID:      now.UnixMilli(),
+		ID:      now.UnixMilli()*1000 + int64(randIntn(1000)), // millisecond ID + random to avoid sub-ms collisions
 		CID:     card.ID,
 		USN:     -1, // Not yet synced
 		Ease:    rating,
@@ -151,14 +153,16 @@ func fsrsCardToAnki(fsrsCard fsrs.Card, original goanki.Card, now time.Time) goa
 	// Set due date based on state
 	switch fsrsCard.State {
 	case fsrs.New:
-		result.Due = 0 // Due immediately
+		result.Due = 0 // Due immediately (relative ordering)
 	case fsrs.Learning, fsrs.Relearning:
 		result.Due = now.Unix() // Due now (seconds since epoch)
 		result.Left = 1         // One learning step remaining
 	case fsrs.Review:
-		// Due is stored as days since collection creation
-		// This will be converted by the collection layer when writing
-		result.Due = 0 // Placeholder - collection layer sets proper day offset
+		// Due is stored as days since collection creation (day offset).
+		// FSRS gives us ScheduledDays from now, so we calculate the day
+		// offset using the current time plus the interval.
+		// The collection layer will correct this if needed (see AnswerCard).
+		result.Due = -1 // Sentinel: collection layer must compute day offset
 	}
 
 	return result
@@ -238,5 +242,23 @@ func ankiRatingToFSRS(rating goanki.Rating) fsrs.Rating {
 		return fsrs.Easy
 	default:
 		return fsrs.Good
+	}
+}
+
+// randIntn generates a cryptographically random integer in [0, n).
+// Uses rejection sampling to avoid modulo bias.
+func randIntn(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	threshold := uint32(0xFFFFFFFF-uint32(n)) + 1
+	threshold -= threshold % uint32(n)
+	b := make([]byte, 4)
+	for {
+		_, _ = rand.Read(b)
+		v := binary.BigEndian.Uint32(b)
+		if v < threshold {
+			return int(v % uint32(n))
+		}
 	}
 }

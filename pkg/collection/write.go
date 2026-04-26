@@ -81,6 +81,14 @@ func (c *Collection) AnswerCard(cardID int64, rating goanki.Rating, scheduler Sc
 		return nil, fmt.Errorf("schedule answer: %w", err)
 	}
 
+	// For Review cards, the scheduler sets Due=-1 as a sentinel because
+	// it doesn't have access to the collection's creation timestamp (crt).
+	// We must compute the proper day offset: days_since_crt + interval.
+	if answer.Card.Type == goanki.CardTypeReview && answer.Card.Due == -1 {
+		dayOffset := dayOffsetSinceCreation(c)
+		answer.Card.Due = dayOffset + int64(answer.Card.IVL)
+	}
+
 	// Start a transaction for atomicity
 	tx, err := c.db.Begin()
 	if err != nil {
@@ -375,7 +383,9 @@ func (c *Collection) AddNote(input goanki.NewNote) (int64, error) {
 // dayOffsetSinceCreation returns the number of days since the collection was created.
 func dayOffsetSinceCreation(c *Collection) int64 {
 	var crt int64
-	_ = c.db.QueryRow("SELECT crt FROM col").Scan(&crt)
+	if err := c.db.QueryRow("SELECT crt FROM col").Scan(&crt); err != nil {
+		log.Printf("warning: failed to query collection creation time: %v", err)
+	}
 	if crt == 0 {
 		return time.Now().Unix() / 86400
 	}
