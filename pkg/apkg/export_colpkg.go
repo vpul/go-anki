@@ -116,5 +116,12 @@ func ExportColpkg(opts ExportColpkgOptions) error {
 		}
 	}
 
+	// Explicitly close the zip writer to flush the central directory and
+	// catch any write errors (e.g., disk full). The deferred close remains as
+	// a fallback for early-exit error paths.
+	if err := zipWriter.Close(); err != nil {
+		return fmt.Errorf("close zip writer: %w", err)
+	}
+
 	return nil
 }

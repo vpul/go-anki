@@ -326,16 +326,17 @@ func (c *Client) FullDownload(ctx context.Context, dbPath string, mediaDir strin
 	extractedMedia := filepath.Join(filepath.Dir(dbPath), "collection.media")
 	if extractedMedia != mediaDir {
 		mediaFiles, err := os.ReadDir(extractedMedia)
-		if err == nil {
-			for _, f := range mediaFiles {
-				if f.IsDir() {
-					continue
-				}
-				src := filepath.Join(extractedMedia, f.Name())
-				dst := filepath.Join(mediaDir, f.Name())
-				if err := copyFile(dst, src); err != nil {
-					return nil, fmt.Errorf("copy media file %s: %w", f.Name(), err)
-				}
+		if err != nil && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("read extracted media dir: %w", err)
+		}
+		for _, f := range mediaFiles {
+			if f.IsDir() {
+				continue
+			}
+			src := filepath.Join(extractedMedia, f.Name())
+			dst := filepath.Join(mediaDir, f.Name())
+			if err := copyFile(dst, src); err != nil {
+				return nil, fmt.Errorf("copy media file %s: %w", f.Name(), err)
 			}
 		}
 	}
