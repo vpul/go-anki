@@ -418,7 +418,7 @@ func (c *Client) FullUpload(ctx context.Context, dbPath string, mediaDir string)
 	formWriter := multipart.NewWriter(pw)
 
 	go func() {
-		defer pw.Close()
+		defer func() { _ = pw.Close() }()
 
 		part, err := formWriter.CreateFormFile("file", filepath.Base(colpkgPath))
 		if err != nil {
