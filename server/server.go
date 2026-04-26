@@ -6,11 +6,11 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"strconv"
-	"strings"
 
 	goanki "github.com/vpul/go-anki/pkg/types"
 
@@ -85,24 +85,11 @@ func jsonResponse(w http.ResponseWriter, v interface{}) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// withCollection opens a read-only collection, calls fn, and closes it.
+// withMode opens a collection with the given mode, calls fn, and closes it.
 // It handles DB locking errors and returns appropriate HTTP error responses.
-func (s *Server) withCollection(fn func(col *collection.Collection, w http.ResponseWriter, r *http.Request)) http.HandlerFunc {
+func (s *Server) withMode(mode collection.OpenMode, fn func(col *collection.Collection, w http.ResponseWriter, r *http.Request)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		col, err := collection.Open(s.dbPath, collection.ReadOnly)
-		if err != nil {
-			errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("open collection: %v", err))
-			return
-		}
-		defer func() { _ = col.Close() }()
-		fn(col, w, r)
-	}
-}
-
-// withCollectionRW opens a read-write collection, calls fn, and closes it.
-func (s *Server) withCollectionRW(fn func(col *collection.Collection, w http.ResponseWriter, r *http.Request)) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		col, err := collection.Open(s.dbPath, collection.ReadWrite)
+		col, err := collection.Open(s.dbPath, mode)
 		if err != nil {
 			errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("open collection: %v", err))
 			return
@@ -118,15 +105,15 @@ func (s *Server) Handler() http.Handler {
 
 	// Read endpoints
 	mux.HandleFunc("GET /api/v1/version", s.handleVersion)
-	mux.HandleFunc("GET /api/v1/decks", s.withCollection(s.handleGetDecks))
-	mux.HandleFunc("GET /api/v1/due-cards", s.withCollection(s.handleGetDueCards))
-	mux.HandleFunc("GET /api/v1/stats", s.withCollection(s.handleGetStats))
-	mux.HandleFunc("GET /api/v1/cards/{id}", s.withCollection(s.handleGetCardByID))
+	mux.HandleFunc("GET /api/v1/decks", s.withMode(collection.ReadOnly, s.handleGetDecks))
+	mux.HandleFunc("GET /api/v1/due-cards", s.withMode(collection.ReadOnly, s.handleGetDueCards))
+	mux.HandleFunc("GET /api/v1/stats", s.withMode(collection.ReadOnly, s.handleGetStats))
+	mux.HandleFunc("GET /api/v1/cards/{id}", s.withMode(collection.ReadOnly, s.handleGetCardByID))
 
 	// Write endpoints
-	mux.HandleFunc("POST /api/v1/answer", s.withCollectionRW(s.handleAnswer))
-	mux.HandleFunc("POST /api/v1/decks", s.withCollectionRW(s.handleCreateDeck))
-	mux.HandleFunc("POST /api/v1/notes", s.withCollectionRW(s.handleAddNote))
+	mux.HandleFunc("POST /api/v1/answer", s.withMode(collection.ReadWrite, s.handleAnswer))
+	mux.HandleFunc("POST /api/v1/decks", s.withMode(collection.ReadWrite, s.handleCreateDeck))
+	mux.HandleFunc("POST /api/v1/notes", s.withMode(collection.ReadWrite, s.handleAddNote))
 
 	// Sync endpoints
 	mux.HandleFunc("POST /api/v1/sync/download", s.handleSyncDownload)
@@ -197,7 +184,7 @@ func (s *Server) handleGetStats(col *collection.Collection, w http.ResponseWrite
 
 // handleGetCardByID returns a single card by its ID.
 func (s *Server) handleGetCardByID(col *collection.Collection, w http.ResponseWriter, r *http.Request) {
-	idStr := strings.TrimPrefix(r.URL.Path, "/api/v1/cards/")
+	idStr := r.PathValue("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid card ID")
@@ -206,7 +193,11 @@ func (s *Server) handleGetCardByID(col *collection.Collection, w http.ResponseWr
 
 	card, err := col.GetCardByID(id)
 	if err != nil {
-		errorResponse(w, http.StatusNotFound, fmt.Sprintf("card not found: %v", err))
+		if errors.Is(err, collection.ErrNotFound) {
+			errorResponse(w, http.StatusNotFound, fmt.Sprintf("card %d not found", id))
+		} else {
+			errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("get card: %v", err))
+		}
 		return
 	}
 	jsonResponse(w, map[string]interface{}{"card": card})
@@ -220,6 +211,7 @@ type answerRequest struct {
 
 // handleAnswer processes a card answer and updates its scheduling.
 func (s *Server) handleAnswer(col *collection.Collection, w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req answerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid request body")
@@ -231,8 +223,6 @@ func (s *Server) handleAnswer(col *collection.Collection, w http.ResponseWriter,
 		return
 	}
 
-	rating := goanki.ParseRating(req.Rating)
-	// ParseRating defaults to RatingGood for unknown strings; check explicitly.
 	switch req.Rating {
 	case "again", "hard", "good", "easy":
 		// valid
@@ -240,6 +230,7 @@ func (s *Server) handleAnswer(col *collection.Collection, w http.ResponseWriter,
 		errorResponse(w, http.StatusBadRequest, "invalid rating: must be one of again, hard, good, easy")
 		return
 	}
+	rating := goanki.ParseRating(req.Rating)
 
 	answer, err := col.AnswerCard(req.CardID, rating, s.scheduler)
 	if err != nil {
@@ -259,6 +250,7 @@ type createDeckRequest struct {
 
 // handleCreateDeck creates a new deck.
 func (s *Server) handleCreateDeck(col *collection.Collection, w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req createDeckRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid request body")
@@ -287,6 +279,7 @@ type addNoteRequest struct {
 
 // handleAddNote creates a new note and its associated cards.
 func (s *Server) handleAddNote(col *collection.Collection, w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req addNoteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid request body")
@@ -345,12 +338,16 @@ func (s *Server) handleSyncDownload(w http.ResponseWriter, _ *http.Request) {
 	// Count cards in the downloaded collection
 	var cardCount int
 	col, err := collection.Open(s.dbPath, collection.ReadOnly)
-	if err == nil {
+	if err != nil {
+		log.Printf("warning: open collection after download: %v", err)
+	} else {
+		defer func() { _ = col.Close() }()
 		stats, statsErr := col.GetStats()
-		if statsErr == nil {
+		if statsErr != nil {
+			log.Printf("warning: get stats after download: %v", statsErr)
+		} else {
 			cardCount = stats.TotalCards
 		}
-		_ = col.Close()
 	}
 
 	jsonResponse(w, map[string]interface{}{

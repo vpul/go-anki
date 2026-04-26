@@ -2,6 +2,7 @@ package collection
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -10,6 +11,9 @@ import (
 
 	goanki "github.com/vpul/go-anki/pkg/types"
 )
+
+// ErrNotFound is returned when a requested resource does not exist.
+var ErrNotFound = errors.New("not found")
 
 // Collection represents an open Anki .anki2 database.
 type Collection struct {
@@ -230,6 +234,9 @@ func (c *Collection) GetCardByID(id int64) (*goanki.Card, error) {
 		&card.Flags, &card.Data,
 	)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
 		return nil, fmt.Errorf("query card %d: %w", id, err)
 	}
 
