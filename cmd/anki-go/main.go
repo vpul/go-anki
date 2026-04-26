@@ -346,10 +346,13 @@ func runSyncDownload() error {
 		return fmt.Errorf("ANKIWEB_USERNAME and ANKIWEB_PASSWORD environment variables are required for sync")
 	}
 
-	client := sync.NewClient(goanki.SyncConfig{
+	client, err := sync.NewClient(goanki.SyncConfig{
 		Username: *username,
 		Password: password,
 	})
+	if err != nil {
+		return fmt.Errorf("create sync client: %w", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
@@ -399,10 +402,13 @@ func runSyncUpload() error {
 		return fmt.Errorf("ANKIWEB_USERNAME and ANKIWEB_PASSWORD environment variables are required for sync")
 	}
 
-	client := sync.NewClient(goanki.SyncConfig{
+	client, err := sync.NewClient(goanki.SyncConfig{
 		Username: *username,
 		Password: password,
 	})
+	if err != nil {
+		return fmt.Errorf("create sync client: %w", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()

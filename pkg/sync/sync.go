@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -98,7 +99,10 @@ func (c *Client) SetPassword(pw string) {
 }
 
 // NewClient creates a new AnkiWeb sync client with the given configuration.
-func NewClient(config goankitypes.SyncConfig) *Client {
+func NewClient(config goankitypes.SyncConfig) (*Client, error) {
+	if err := validateURL(DefaultSyncURL); err != nil {
+		return nil, fmt.Errorf("validate default sync URL: %w", err)
+	}
 	return &Client{
 		config:   config,
 		password: config.Password,
@@ -106,12 +110,15 @@ func NewClient(config goankitypes.SyncConfig) *Client {
 		httpClient: &http.Client{
 			Timeout: 5 * time.Minute, // Large downloads may take time
 		},
-	}
+	}, nil
 }
 
 // NewClientWithURL creates a new AnkiWeb sync client with a custom base URL.
 // This is useful for testing against a local ankisyncd server.
-func NewClientWithURL(config goankitypes.SyncConfig, baseURL string) *Client {
+func NewClientWithURL(config goankitypes.SyncConfig, baseURL string) (*Client, error) {
+	if err := validateURL(baseURL); err != nil {
+		return nil, fmt.Errorf("validate sync URL: %w", err)
+	}
 	return &Client{
 		config:   config,
 		password: config.Password,
@@ -119,7 +126,7 @@ func NewClientWithURL(config goankitypes.SyncConfig, baseURL string) *Client {
 		httpClient: &http.Client{
 			Timeout: 5 * time.Minute,
 		},
-	}
+	}, nil
 }
 
 // SetHTTPClient sets a custom HTTP client for the sync operations.
@@ -377,6 +384,87 @@ func (c *Client) FullDownload(ctx context.Context, dbPath string, mediaDir strin
 		MediaDir:            mediaDir,
 		MediaFilesImported:   result.MediaFilesImported,
 	}, nil
+}
+
+// validateURL checks that a URL is safe to connect to, preventing SSRF attacks.
+// It requires HTTPS scheme (or HTTP only for localhost/loopback), and blocks
+// connections to private/reserved IP ranges.
+func validateURL(u string) error {
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return fmt.Errorf("parse URL: %w", err)
+	}
+
+	// Require HTTPS unless hostname is localhost or loopback
+	isLocalhost := parsed.Hostname() == "localhost" || parsed.Hostname() == "127.0.0.1" || parsed.Hostname() == "::1"
+	switch parsed.Scheme {
+	case "https":
+		// ok
+	case "http":
+		if !isLocalhost {
+			return fmt.Errorf("insecure URL scheme %q: only https is allowed for remote hosts", parsed.Scheme)
+		}
+	default:
+		return fmt.Errorf("unsupported URL scheme %q: must be http or https", parsed.Scheme)
+	}
+
+	hostname := parsed.Hostname()
+	if hostname == "" {
+		return fmt.Errorf("URL has no hostname")
+	}
+
+	// Resolve hostname to catch DNS-based SSRF
+	addrs, err := net.LookupHost(hostname)
+	if err != nil {
+		return fmt.Errorf("resolve hostname %q: %w", hostname, err)
+	}
+
+	for _, addr := range addrs {
+		ip := net.ParseIP(addr)
+		if ip == nil {
+			return fmt.Errorf("resolved non-IP address %q for hostname %q", addr, hostname)
+		}
+		if isPrivateIP(ip) {
+			// Allow loopback only if explicitly using localhost
+			if ip.IsLoopback() && isLocalhost {
+				continue
+			}
+			return fmt.Errorf("hostname %q resolves to private/reserved IP %s", hostname, ip)
+		}
+	}
+
+	return nil
+}
+
+// isPrivateIP checks whether an IP address is in a private or reserved range.
+func isPrivateIP(ip net.IP) bool {
+	privateRanges := []struct {
+		network *net.IPNet
+	}{
+		{mustParseCIDR("10.0.0.0/8")},
+		{mustParseCIDR("172.16.0.0/12")},
+		{mustParseCIDR("192.168.0.0/16")},
+		{mustParseCIDR("169.254.0.0/16")},
+		{mustParseCIDR("127.0.0.0/8")},
+		{mustParseCIDR("::1/128")},
+		{mustParseCIDR("0.0.0.0/32")},
+	}
+
+	for _, r := range privateRanges {
+		if r.network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// mustParseCIDR parses a CIDR string or panics. Used for static CIDR ranges.
+func mustParseCIDR(s string) *net.IPNet {
+	_, network, err := net.ParseCIDR(s)
+	if err != nil {
+		panic(err)
+	}
+	return network
 }
 
 // copyFile copies a file from src to dst.

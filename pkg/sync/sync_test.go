@@ -22,7 +22,10 @@ func TestNewClient(t *testing.T) {
 		Username: "test@example.com",
 		Password: "secret",
 	}
-	client := NewClient(config)
+	client, err := NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 
 	if client.baseURL != DefaultSyncURL {
 		t.Errorf("expected baseURL %q, got %q", DefaultSyncURL, client.baseURL)
@@ -38,7 +41,10 @@ func TestNewClientWithURL(t *testing.T) {
 		Password: "secret",
 	}
 	customURL := "http://localhost:8080/sync/"
-	client := NewClientWithURL(config, customURL)
+	client, err := NewClientWithURL(config, customURL)
+	if err != nil {
+		t.Fatalf("NewClientWithURL failed: %v", err)
+	}
 
 	if client.baseURL != customURL {
 		t.Errorf("expected baseURL %q, got %q", customURL, client.baseURL)
@@ -61,12 +67,15 @@ func TestAuthenticateSuccess(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClientWithURL(goankitypes.SyncConfig{
+	client, err := NewClientWithURL(goankitypes.SyncConfig{
 		Username: "test@example.com",
 		Password: "secret",
 	}, server.URL+"/sync/")
+	if err != nil {
+		t.Fatalf("NewClientWithURL failed: %v", err)
+	}
 
-	err := client.Authenticate(context.Background())
+	err = client.Authenticate(context.Background())
 	if err != nil {
 		t.Fatalf("Authenticate failed: %v", err)
 	}
@@ -81,12 +90,15 @@ func TestAuthenticateFailure(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClientWithURL(goankitypes.SyncConfig{
+	client, err := NewClientWithURL(goankitypes.SyncConfig{
 		Username: "bad@example.com",
 		Password: "wrong",
 	}, server.URL+"/sync/")
+	if err != nil {
+		t.Fatalf("NewClientWithURL failed: %v", err)
+	}
 
-	err := client.Authenticate(context.Background())
+	err = client.Authenticate(context.Background())
 	if err == nil {
 		t.Fatal("expected authentication to fail, but it succeeded")
 	}
@@ -100,23 +112,29 @@ func TestAuthenticateEmptyKey(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClientWithURL(goankitypes.SyncConfig{
+	client, err := NewClientWithURL(goankitypes.SyncConfig{
 		Username: "test@example.com",
 		Password: "secret",
 	}, server.URL+"/sync/")
+	if err != nil {
+		t.Fatalf("NewClientWithURL failed: %v", err)
+	}
 
-	err := client.Authenticate(context.Background())
+	err = client.Authenticate(context.Background())
 	if err == nil {
 		t.Fatal("expected error for empty session key")
 	}
 }
 
 func TestMetaWithoutAuth(t *testing.T) {
-	client := NewClient(goankitypes.SyncConfig{
+	client, err := NewClient(goankitypes.SyncConfig{
 		Username: "test@example.com",
 		Password: "secret",
 	})
-	_, err := client.Meta(context.Background())
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	_, err = client.Meta(context.Background())
 	if err == nil {
 		t.Fatal("expected error when calling Meta without authentication")
 	}
@@ -147,7 +165,7 @@ func TestMetaSuccess(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClientWithURL(goankitypes.SyncConfig{
+	client, err := NewClientWithURL(goankitypes.SyncConfig{
 		Username: "test@example.com",
 		Password: "secret",
 	}, server.URL+"/sync/")
@@ -173,32 +191,41 @@ func TestMetaSuccess(t *testing.T) {
 }
 
 func TestDownloadWithoutAuth(t *testing.T) {
-	client := NewClient(goankitypes.SyncConfig{
+	client, err := NewClient(goankitypes.SyncConfig{
 		Username: "test@example.com",
 		Password: "secret",
 	})
-	_, err := client.FullDownload(context.Background(), "/tmp/test.anki2", "/tmp/media")
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	_, err = client.FullDownload(context.Background(), "/tmp/test.anki2", "/tmp/media")
 	if err == nil {
 		t.Fatal("expected error when calling FullDownload without authentication")
 	}
 }
 
 func TestUploadWithoutAuth(t *testing.T) {
-	client := NewClient(goankitypes.SyncConfig{
+	client, err := NewClient(goankitypes.SyncConfig{
 		Username: "test@example.com",
 		Password: "secret",
 	})
-	err := client.FullUpload(context.Background(), "/tmp/test.anki2", "/tmp/media")
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	err = client.FullUpload(context.Background(), "/tmp/test.anki2", "/tmp/media")
 	if err == nil {
 		t.Fatal("expected error when calling FullUpload without authentication")
 	}
 }
 
 func TestSetHTTPClient(t *testing.T) {
-	client := NewClient(goankitypes.SyncConfig{
+	client, err := NewClient(goankitypes.SyncConfig{
 		Username: "test",
 		Password: "test",
 	})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 	customClient := &http.Client{Timeout: 0}
 	client.SetHTTPClient(customClient)
 	if client.httpClient != customClient {
@@ -218,10 +245,13 @@ func TestAuthURLConstruction(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClientWithURL(goankitypes.SyncConfig{
+	client, err := NewClientWithURL(goankitypes.SyncConfig{
 		Username: "user",
 		Password: "pass",
 	}, server.URL+"/sync/")
+	if err != nil {
+		t.Fatalf("NewClientWithURL failed: %v", err)
+	}
 
 	if err := client.Authenticate(context.Background()); err != nil {
 		t.Fatalf("Authenticate: %v", err)
@@ -241,10 +271,13 @@ func TestSyncURLWithTrailingSlash(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClientWithURL(goankitypes.SyncConfig{
+	client, err := NewClientWithURL(goankitypes.SyncConfig{
 		Username: "user",
 		Password: "pass",
 	}, server.URL+"/sync/")
+	if err != nil {
+		t.Fatalf("NewClientWithURL: %v", err)
+	}
 
 	if err := client.Authenticate(context.Background()); err != nil {
 		t.Fatalf("Authenticate: %v", err)
@@ -372,7 +405,7 @@ func TestFullDownloadSuccess(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClientWithURL(goankitypes.SyncConfig{
+	client, err := NewClientWithURL(goankitypes.SyncConfig{
 		Username: "test@example.com",
 		Password: "secret",
 	}, server.URL+"/sync/")
@@ -428,7 +461,7 @@ func TestFullDownloadMediaRelocation(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClientWithURL(goankitypes.SyncConfig{
+	client, err := NewClientWithURL(goankitypes.SyncConfig{
 		Username: "test@example.com",
 		Password: "secret",
 	}, server.URL+"/sync/")
@@ -485,17 +518,20 @@ func TestFullDownloadServerError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClientWithURL(goankitypes.SyncConfig{
+	client, err := NewClientWithURL(goankitypes.SyncConfig{
 		Username: "test@example.com",
 		Password: "secret",
 	}, server.URL+"/sync/")
+	if err != nil {
+		t.Fatalf("NewClientWithURL: %v", err)
+	}
 
 	if err := client.Authenticate(context.Background()); err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
 
 	tmpDir := t.TempDir()
-	_, err := client.FullDownload(context.Background(), filepath.Join(tmpDir, "test.anki2"), filepath.Join(tmpDir, "media"))
+	_, err = client.FullDownload(context.Background(), filepath.Join(tmpDir, "test.anki2"), filepath.Join(tmpDir, "media"))
 	if err == nil {
 		t.Fatal("expected error for server error response")
 	}
@@ -552,16 +588,19 @@ func TestFullUploadSuccess(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClientWithURL(goankitypes.SyncConfig{
+	client, err := NewClientWithURL(goankitypes.SyncConfig{
 		Username: "test@example.com",
 		Password: "secret",
 	}, server.URL+"/sync/")
+	if err != nil {
+		t.Fatalf("NewClientWithURL: %v", err)
+	}
 
 	if err := client.Authenticate(context.Background()); err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
 
-	err := client.FullUpload(context.Background(), sourceDB, mediaDir)
+	err = client.FullUpload(context.Background(), sourceDB, mediaDir)
 	if err != nil {
 		t.Fatalf("FullUpload: %v", err)
 	}
@@ -591,16 +630,19 @@ func TestFullUploadWithEmptyMediaDir(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClientWithURL(goankitypes.SyncConfig{
+	client, err := NewClientWithURL(goankitypes.SyncConfig{
 		Username: "test@example.com",
 		Password: "secret",
 	}, server.URL+"/sync/")
+	if err != nil {
+		t.Fatalf("NewClientWithURL: %v", err)
+	}
 
 	if err := client.Authenticate(context.Background()); err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
 
-	err := client.FullUpload(context.Background(), sourceDB, "")
+	err = client.FullUpload(context.Background(), sourceDB, "")
 	if err != nil {
 		t.Fatalf("FullUpload without media: %v", err)
 	}
@@ -628,16 +670,19 @@ func TestFullUploadServerError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClientWithURL(goankitypes.SyncConfig{
+	client, err := NewClientWithURL(goankitypes.SyncConfig{
 		Username: "test@example.com",
 		Password: "secret",
 	}, server.URL+"/sync/")
+	if err != nil {
+		t.Fatalf("NewClientWithURL: %v", err)
+	}
 
 	if err := client.Authenticate(context.Background()); err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
 
-	err := client.FullUpload(context.Background(), sourceDB, "")
+	err = client.FullUpload(context.Background(), sourceDB, "")
 	if err == nil {
 		t.Fatal("expected error for server error response")
 	}

@@ -594,7 +594,11 @@ func (s *Server) handleSyncDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := sync.NewClient(*s.syncConfig)
+	client, err := sync.NewClient(*s.syncConfig)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("create sync client: %v", err))
+		return
+	}
 	ctx := r.Context()
 
 	if err := client.Authenticate(ctx); err != nil {
@@ -637,7 +641,11 @@ func (s *Server) handleSyncUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := sync.NewClient(*s.syncConfig)
+	client, err := sync.NewClient(*s.syncConfig)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("create sync client: %v", err))
+		return
+	}
 	ctx := r.Context()
 
 	if err := client.Authenticate(ctx); err != nil {
