@@ -224,7 +224,7 @@ func (c *Client) FullDownload(ctx context.Context, dbPath string, mediaDir strin
 	if err != nil {
 		return nil, fmt.Errorf("create temp dir: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	colpkgPath := filepath.Join(tmpDir, "download.colpkg")
 
@@ -344,7 +344,7 @@ func (c *Client) FullUpload(ctx context.Context, dbPath string, mediaDir string)
 	if err != nil {
 		return fmt.Errorf("create temp dir: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	colpkgPath := filepath.Join(tmpDir, "upload.colpkg")
 

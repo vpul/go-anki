@@ -5,16 +5,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 
 	"github.com/klauspost/compress/zstd"
 )
 
-// ExportColpkg creates a .colpkg (collection package) file from an Anki
-// collection database. The .colpkg format is used for AnkiWeb sync and
-// full collection backup.
+// ExportColpkgOptions configures how a .colpkg (collection package) file is created.
 //
 // A .colpkg is a ZIP archive containing:
 //   - collection.anki21b: Zstandard-compressed SQLite database
@@ -133,23 +130,6 @@ func compressZstd(data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("create zstd writer: %w", err)
 	}
 	if _, err := writer.Write(data); err != nil {
-		_ = writer.Close()
-		return nil, fmt.Errorf("write zstd data: %w", err)
-	}
-	if err := writer.Close(); err != nil {
-		return nil, fmt.Errorf("close zstd writer: %w", err)
-	}
-	return buf.Bytes(), nil
-}
-
-// compressZstdWithLevel compresses data using Zstandard at the specified level.
-func compressZstdWithLevel(data []byte, level int) ([]byte, error) {
-	var buf bytes.Buffer
-	writer, err := zstd.NewWriter(&buf, zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(level)))
-	if err != nil {
-		return nil, fmt.Errorf("create zstd writer: %w", err)
-	}
-	if _, err := io.Copy(writer, bytes.NewReader(data)); err != nil {
 		_ = writer.Close()
 		return nil, fmt.Errorf("write zstd data: %w", err)
 	}
