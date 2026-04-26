@@ -85,16 +85,24 @@ type DownloadResult struct {
 // Client is an AnkiWeb sync client.
 type Client struct {
 	config     goankitypes.SyncConfig
+	password   string // unexported to prevent leaking via JSON/string representations
 	baseURL    string
 	httpClient *http.Client
 	sessionKey string
 }
 
+// SetPassword sets the sync password. Use this instead of setting Password
+// directly on SyncConfig to keep the credential in an unexported field.
+func (c *Client) SetPassword(pw string) {
+	c.password = pw
+}
+
 // NewClient creates a new AnkiWeb sync client with the given configuration.
 func NewClient(config goankitypes.SyncConfig) *Client {
 	return &Client{
-		config:  config,
-		baseURL: DefaultSyncURL,
+		config:   config,
+		password: config.Password,
+		baseURL:  DefaultSyncURL,
 		httpClient: &http.Client{
 			Timeout: 5 * time.Minute, // Large downloads may take time
 		},
@@ -105,8 +113,9 @@ func NewClient(config goankitypes.SyncConfig) *Client {
 // This is useful for testing against a local ankisyncd server.
 func NewClientWithURL(config goankitypes.SyncConfig, baseURL string) *Client {
 	return &Client{
-		config:  config,
-		baseURL: baseURL,
+		config:   config,
+		password: config.Password,
+		baseURL:  baseURL,
 		httpClient: &http.Client{
 			Timeout: 5 * time.Minute,
 		},
@@ -150,7 +159,7 @@ func (c *Client) Authenticate(ctx context.Context) error {
 
 	data := url.Values{}
 	data.Set("u", c.config.Username)
-	data.Set("p", c.config.Password)
+	data.Set("p", c.password)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, authURL, bytes.NewBufferString(data.Encode()))
 	if err != nil {
