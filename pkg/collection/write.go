@@ -17,12 +17,43 @@ func validateDeckName(name string) error {
 	if name == "" {
 		return fmt.Errorf("invalid deck name: must not be empty")
 	}
-	if len(name) > 255 {
-		return fmt.Errorf("invalid deck name: exceeds 255 characters")
+	if len(name) > 500 {
+		return fmt.Errorf("invalid deck name: exceeds 500 characters")
 	}
-	for i := 0; i < len(name); i++ {
-		if name[i] < 0x20 {
-			return fmt.Errorf("invalid deck name: contains control character")
+	if strings.ContainsRune(name, 0) {
+		return fmt.Errorf("invalid deck name: contains null byte")
+	}
+	if strings.ContainsRune(name, '\n') {
+		return fmt.Errorf("invalid deck name: contains newline")
+	}
+	return nil
+}
+
+// validateNote checks that a note's fields and tags are valid.
+func validateNote(note goanki.NewNote) error {
+	// At least one field must have non-empty content
+	hasContent := false
+	for _, v := range note.Fields {
+		if len(v) > 100000 {
+			return fmt.Errorf("invalid note: field exceeds 100000 characters")
+		}
+		if strings.ContainsRune(v, 0) {
+			return fmt.Errorf("invalid note: field contains null byte")
+		}
+		if v != "" {
+			hasContent = true
+		}
+	}
+	if !hasContent {
+		return fmt.Errorf("invalid note: at least one field must have content")
+	}
+	// Validate tags
+	for _, tag := range note.Tags {
+		if len(tag) > 100 {
+			return fmt.Errorf("invalid note: tag %q exceeds 100 characters", tag)
+		}
+		if strings.ContainsRune(tag, 0) {
+			return fmt.Errorf("invalid note: tag contains null byte")
 		}
 	}
 	return nil
@@ -226,6 +257,10 @@ func (c *Collection) createDeckUnlocked(name string) (int64, error) {
 // AddNote creates a new note and its associated cards.
 // Returns the note ID on success.
 func (c *Collection) AddNote(input goanki.NewNote) (int64, error) {
+	if err := validateNote(input); err != nil {
+		return 0, err
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
