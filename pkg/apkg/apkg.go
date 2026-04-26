@@ -21,6 +21,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -230,6 +231,9 @@ func ImportApkg(apkgPath string, destDir string) (*ImportResult, error) {
 			if !ok {
 				continue
 			}
+			if err := validateMediaFilename(filename); err != nil {
+				return nil, fmt.Errorf("invalid media filename in archive: %w", err)
+			}
 			mediaPath := filepath.Join(mediaDir, filename)
 			if err := validatePathWithinDir(mediaPath, mediaDir); err != nil {
 				return nil, fmt.Errorf("media file path escapes destination: %s: %w", filename, err)
@@ -328,6 +332,9 @@ func ImportColpkg(colpkgPath string, destDir string) (*ImportResult, error) {
 			if !ok {
 				continue
 			}
+			if err := validateMediaFilename(filename); err != nil {
+				return nil, fmt.Errorf("invalid media filename in archive: %w", err)
+			}
 			mediaPath := filepath.Join(mediaDir, filename)
 			if err := validatePathWithinDir(mediaPath, mediaDir); err != nil {
 				return nil, fmt.Errorf("media file path escapes destination: %s: %w", filename, err)
@@ -374,6 +381,28 @@ func validateZipEntryName(entryName, destDir string) error {
 	}
 	if strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
 		return fmt.Errorf("entry resolves outside destination directory")
+	}
+	return nil
+}
+
+// validateMediaFilename checks that a media filename is safe for extraction.
+// It must contain only alphanumeric characters, underscores, hyphens, and dots;
+// must not start with a dot (no hidden files); must not contain ".."; and must
+// not be empty.
+var validMediaFilenameRe = regexp.MustCompile(`^[a-zA-Z0-9_]([a-zA-Z0-9_.-]*[a-zA-Z0-9_.-])?$|^[a-zA-Z0-9_]$`)
+
+func validateMediaFilename(name string) error {
+	if name == "" {
+		return fmt.Errorf("invalid media filename: %q", name)
+	}
+	if strings.HasPrefix(name, ".") {
+		return fmt.Errorf("invalid media filename: %q", name)
+	}
+	if strings.Contains(name, "..") {
+		return fmt.Errorf("invalid media filename: %q", name)
+	}
+	if !validMediaFilenameRe.MatchString(name) {
+		return fmt.Errorf("invalid media filename: %q", name)
 	}
 	return nil
 }
