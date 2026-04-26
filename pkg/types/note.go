@@ -4,7 +4,7 @@ import "strings"
 
 // Note represents an Anki note (row in the notes table).
 type Note struct {
-	ID    int64  `json:"id" db:"id" db:"guid"`
+	ID    int64  `json:"id" db:"id"`
 	GUID  string `json:"guid" db:"guid"`
 	MID   int64  `json:"mid" db:"mid"` // Model (note type) ID
 	Mod   int64  `json:"mod" db:"mod"` // Modification timestamp

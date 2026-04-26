@@ -1,16 +1,85 @@
 package collection
 
 import (
+	"crypto/rand"
+	"encoding/binary"
 	"fmt"
+	"hash/crc32"
+	"strings"
 	"time"
 
 	goanki "github.com/vpul/go-anki/pkg/types"
 )
 
-// UpdateCard updates a card in the database after answering it.
+// AnswerCard answers a card with the given rating using the FSRS scheduler.
+// It updates the card in the database and inserts a review log entry.
+// Returns the updated card and review log, or an error.
+func (c *Collection) AnswerCard(cardID int64, rating goanki.Rating, scheduler Scheduler) (*goanki.Answer, error) {
+	// Fetch the card
+	card, err := c.GetCardByID(cardID)
+	if err != nil {
+		return nil, fmt.Errorf("get card %d: %w", cardID, err)
+	}
+
+	// Compute the next state using the scheduler
+	answer, err := scheduler.Answer(*card, rating, time.Now())
+	if err != nil {
+		return nil, fmt.Errorf("schedule answer: %w", err)
+	}
+
+	// Start a transaction for atomicity
+	tx, err := c.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Update the card
+	_, err = tx.Exec(`
+		UPDATE cards SET
+			type = ?, queue = ?, due = ?, ivl = ?, factor = ?,
+			reps = ?, lapses = ?, left = ?, mod = ?, usn = -1,
+			odue = ?, odid = ?, flags = ?, data = ?
+		WHERE id = ?`,
+		answer.Card.Type, answer.Card.Queue, answer.Card.Due, answer.Card.IVL,
+		answer.Card.Factor, answer.Card.Reps, answer.Card.Lapses, answer.Card.Left,
+		answer.Card.Mod, answer.Card.ODue, answer.Card.ODID, answer.Card.Flags,
+		answer.Card.Data, answer.Card.ID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("update card %d: %w", cardID, err)
+	}
+
+	// Update FSRS fields if present (Anki 23.12+ schema)
+	if answer.Card.Stability != nil && answer.Card.Difficulty != nil {
+		// Try to update FSRS columns — ignore error if they don't exist (older schema)
+		_, _ = tx.Exec(`UPDATE cards SET stability = ?, difficulty = ? WHERE id = ?`,
+			*answer.Card.Stability, *answer.Card.Difficulty, answer.Card.ID)
+	}
+
+	// Insert review log
+	_, err = tx.Exec(`
+		INSERT INTO revlog (id, cid, usn, ease, ivl, last_ivl, factor, time, type)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		answer.Review.ID, answer.Review.CID, answer.Review.USN, int(answer.Review.Ease),
+		answer.Review.IVL, answer.Review.LastIVL, answer.Review.Factor,
+		answer.Review.Time, int(answer.Review.Type),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("insert review log: %w", err)
+	}
+
+	// Commit transaction
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit transaction: %w", err)
+	}
+
+	return answer, nil
+}
+
+// UpdateCard updates a card in the database.
 // Sets mod timestamp and marks usn=-1 (not yet synced).
 func (c *Collection) UpdateCard(card goanki.Card) error {
-	now := time.Now().Unix()
 	_, err := c.db.Exec(`
 		UPDATE cards SET
 			type = ?, queue = ?, due = ?, ivl = ?, factor = ?,
@@ -18,8 +87,8 @@ func (c *Collection) UpdateCard(card goanki.Card) error {
 			odue = ?, odid = ?, flags = ?, data = ?
 		WHERE id = ?`,
 		card.Type, card.Queue, card.Due, card.IVL, card.Factor,
-		card.Reps, card.Lapses, card.Left, now, card.ODue, card.ODID,
-		card.Flags, card.Data, card.ID,
+		card.Reps, card.Lapses, card.Left, time.Now().Unix(),
+		card.ODue, card.ODID, card.Flags, card.Data, card.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("update card %d: %w", card.ID, err)
@@ -32,8 +101,8 @@ func (c *Collection) InsertReviewLog(review goanki.ReviewLog) error {
 	_, err := c.db.Exec(`
 		INSERT INTO revlog (id, cid, usn, ease, ivl, last_ivl, factor, time, type)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		review.ID, review.CID, review.USN, review.Ease,
-		review.IVL, review.LastIVL, review.Factor, review.Time, review.Type,
+		review.ID, review.CID, review.USN, int(review.Ease),
+		review.IVL, review.LastIVL, review.Factor, review.Time, int(review.Type),
 	)
 	if err != nil {
 		return fmt.Errorf("insert review log: %w", err)
@@ -42,22 +111,22 @@ func (c *Collection) InsertReviewLog(review goanki.ReviewLog) error {
 }
 
 // CreateDeck creates a new deck and returns its ID.
-// It updates the decks JSON blob in the col table.
+// If a deck with the same name already exists, returns its ID without error.
 func (c *Collection) CreateDeck(name string) (int64, error) {
 	decks, err := c.GetDecks()
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("get decks: %w", err)
 	}
 
 	// Check if deck already exists
 	for _, d := range decks {
 		if d.Name == name {
-			return d.ID, nil // Return existing deck ID
+			return d.ID, nil
 		}
 	}
 
 	now := time.Now().Unix()
-	id := now * 1000 // Anki-style ID: timestamp in milliseconds
+	id := now*1000 + int64(randInt(1000)) // Anki-style: timestamp_ms + random offset
 
 	newDeck := goanki.Deck{
 		ID:    id,
@@ -85,16 +154,18 @@ func (c *Collection) CreateDeck(name string) (int64, error) {
 }
 
 // AddNote creates a new note and its associated cards.
+// Returns the note ID on success.
 func (c *Collection) AddNote(input goanki.NewNote) (int64, error) {
 	models, err := c.GetModels()
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("get models: %w", err)
 	}
 
 	// Find the model
 	var model *goanki.Model
 	for _, m := range models {
 		if m.Name == input.ModelName {
+			m := m // capture loop variable
 			model = &m
 			break
 		}
@@ -103,24 +174,21 @@ func (c *Collection) AddNote(input goanki.NewNote) (int64, error) {
 		return 0, fmt.Errorf("model %q not found", input.ModelName)
 	}
 
-	// Find the deck
-	decks, err := c.GetDecks()
+	// Find or create the deck
+	deckID, err := c.CreateDeck(input.DeckName)
 	if err != nil {
-		return 0, err
-	}
-	var deckID int64
-	for _, d := range decks {
-		if d.Name == input.DeckName {
-			deckID = d.ID
-			break
-		}
-	}
-	if deckID == 0 {
-		return 0, fmt.Errorf("deck %q not found", input.DeckName)
+		return 0, fmt.Errorf("create/get deck: %w", err)
 	}
 
+	// Start a transaction for atomicity
+	tx, err := c.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	now := time.Now().Unix()
-	noteID := now * 1000
+	noteID := now*1000 + int64(randInt(1000))
 
 	// Build fields string (separated by \x1f)
 	fieldValues := make([]string, len(model.Fields))
@@ -134,30 +202,24 @@ func (c *Collection) AddNote(input goanki.NewNote) (int64, error) {
 
 	// Calculate sort field and checksum
 	sfld := ""
-	sortIdx := model.SortField
-	if sortIdx < len(fieldValues) {
-		sfld = fieldValues[sortIdx]
+	if model.SortField < len(fieldValues) {
+		sfld = fieldValues[model.SortField]
 	}
 	csum := fieldChecksum(sfld)
 
-	// Build tags string
+	// Build tags string (space-separated, wrapped in spaces)
 	tags := ""
-	for i, t := range input.Tags {
-		if i > 0 {
-			tags += " "
-		}
-		tags += t
-	}
-	if tags != "" {
-		tags = " " + tags + " "
+	if len(input.Tags) > 0 {
+		tags = " " + strings.Join(input.Tags, " ") + " "
 	}
 
 	// Insert note
-	_, err = c.db.Exec(`
+	guid := generateGUID()
+	_, err = tx.Exec(`
 		INSERT INTO notes (id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		noteID, generateGUID(), model.ID, now, -1, tags,
-		joinFields(fieldValues), sfld, csum, 0, "",
+		noteID, guid, model.ID, now, -1, tags,
+		strings.Join(fieldValues, "\x1f"), sfld, csum, 0, "",
 	)
 	if err != nil {
 		return 0, fmt.Errorf("insert note: %w", err)
@@ -165,61 +227,67 @@ func (c *Collection) AddNote(input goanki.NewNote) (int64, error) {
 
 	// Create cards for each template
 	for _, tmpl := range model.Templates {
-		cardID := noteID + int64(tmpl.ORD) // Unique card ID
-		_, err = c.db.Exec(`
+		cardID := noteID + int64(tmpl.ORD) + int64(randInt(100))
+		_, err = tx.Exec(`
 			INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl,
 			                    factor, reps, lapses, left, odue, odid, flags, data)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			cardID, noteID, deckID, tmpl.ORD, now, -1,
 			int(goanki.CardTypeNew), int(goanki.QueueNew),
-			c.nowAsDays(), 0, 0, 0, 0, 0, 0, 0, 0, "",
+			dayOffsetSinceCreation(c), 0, 0, 0, 0, 0, 0, 0, 0, "",
 		)
 		if err != nil {
 			return 0, fmt.Errorf("insert card: %w", err)
 		}
 	}
 
+	// Commit transaction
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit transaction: %w", err)
+	}
+
 	return noteID, nil
 }
 
-// nowAsDays returns the current time as days since collection creation.
-func (c *Collection) nowAsDays() int64 {
+// dayOffsetSinceCreation returns the number of days since the collection was created.
+func dayOffsetSinceCreation(c *Collection) int64 {
 	var crt int64
-	c.db.QueryRow("SELECT crt FROM col").Scan(&crt)
+	_ = c.db.QueryRow("SELECT crt FROM col").Scan(&crt)
 	if crt == 0 {
-		return int64(time.Now().Unix() / 86400)
+		return time.Now().Unix() / 86400
 	}
 	return (time.Now().Unix() - crt) / 86400
 }
 
-// generateGUID creates a GUID for a new note.
+// generateGUID creates a cryptographically random 10-character GUID for a note.
 func generateGUID() string {
-	// Anki uses a random 10-character string
 	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	b := make([]byte, 10)
+	_, _ = rand.Read(b)
 	for i := range b {
-		b[i] = chars[time.Now().UnixNano()%int64(len(chars))]
+		b[i] = chars[b[i]%byte(len(chars))]
 	}
 	return string(b)
 }
 
-// fieldChecksum computes the Anki field checksum (first 8 hex chars of CRC32).
+// fieldChecksum computes the Anki field checksum.
+// Anki uses the first 8 hex characters of CRC32 of the stripped field value.
 func fieldChecksum(field string) string {
-	// Anki uses the first 8 characters of the CRC32 hash
-	// of the stripped field value, converted to a string
-	// Simplified: use a basic hash
-	// TODO: implement proper Anki-compatible CRC32 checksum
-	return "00000000"
+	// Strip HTML tags and whitespace for checksum
+	stripped := strings.TrimSpace(field)
+	checksum := crc32.ChecksumIEEE([]byte(stripped))
+	return fmt.Sprintf("%08x", checksum)
 }
 
-// joinFields joins field values with the Anki field separator.
-func joinFields(fields []string) string {
-	result := ""
-	for i, f := range fields {
-		if i > 0 {
-			result += "\x1f"
-		}
-		result += f
-	}
-	return result
+// randInt generates a cryptographically random non-negative integer.
+func randInt(max int) int {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	return int(binary.BigEndian.Uint32(b) % uint32(max))
+}
+
+// Scheduler interface for the AnswerCard method.
+// This allows different scheduling implementations.
+type Scheduler interface {
+	Answer(card goanki.Card, rating goanki.Rating, now time.Time) (*goanki.Answer, error)
 }
