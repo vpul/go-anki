@@ -226,17 +226,21 @@ func (s *Server) handleGetDecks(col *collection.Collection, w http.ResponseWrite
 
 // handleGetDueCards returns cards that are due for review.
 func (s *Server) handleGetDueCards(col *collection.Collection, w http.ResponseWriter, r *http.Request) {
-	filter := goanki.DueCardsFilter{
-		Limit: 20,
-	}
+	filter := goanki.DueCardsFilter{}
 
 	if deck := r.URL.Query().Get("deck"); deck != "" {
 		filter.DeckName = deck
 	}
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-		if n, err := strconv.Atoi(limitStr); err == nil && n > 0 {
+		if n, err := strconv.Atoi(limitStr); err == nil {
 			filter.Limit = n
 		}
+	}
+	if filter.Limit <= 0 {
+		filter.Limit = 100
+	}
+	if filter.Limit > 1000 {
+		filter.Limit = 1000
 	}
 
 	cards, err := col.GetDueCards(filter)
