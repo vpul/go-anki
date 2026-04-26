@@ -74,11 +74,8 @@ func Open(path string, mode OpenMode) (*Collection, error) {
 	// We intentionally do NOT set SetMaxOpenConns(1) because:
 	//   1. It would prevent transactions from using a separate connection for reads
 	//      (e.g., dayOffsetSinceCreation uses c.db.QueryRow inside a tx), causing deadlocks.
-	//   2. The WriteWrite mutex + SQLite WAL mode + _busy_timeout provides sufficient
+	//   2. The mutex + SQLite WAL mode + _busy_timeout provides sufficient
 	//      serialization for our use case.
-	if mode == ReadWrite {
-		// Mutex + busy_timeout is sufficient; no SetMaxOpenConns needed.
-	}
 
 	// Verify this is actually an Anki database and cache schema version
 	var ver int
