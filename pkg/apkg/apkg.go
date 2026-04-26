@@ -516,8 +516,11 @@ func discoverMediaFiles(mediaDir string) (MediaMap, error) {
 		if entry.IsDir() {
 			continue
 		}
-		// Skip hidden files and non-media files
+		// Skip hidden files and files with invalid names
 		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		if err := validateMediaFilename(entry.Name()); err != nil {
 			continue
 		}
 		mediaMap[fmt.Sprintf("%d", idx)] = entry.Name()

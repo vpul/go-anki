@@ -309,7 +309,9 @@ func (c *Collection) GetStats() (*goanki.Stats, error) {
 
 	// Count due cards
 	var crt int64
-	_ = c.db.QueryRow("SELECT crt FROM col").Scan(&crt)
+	if err := c.db.QueryRow("SELECT crt FROM col").Scan(&crt); err != nil {
+		return nil, fmt.Errorf("query collection creation time: %w", err)
+	}
 	var dayCutoff int64
 	if crt > 0 {
 		dayCutoff = (time.Now().Unix() - crt) / 86400
@@ -317,10 +319,18 @@ func (c *Collection) GetStats() (*goanki.Stats, error) {
 		dayCutoff = time.Now().Unix() / 86400
 	}
 
-	_ = c.db.QueryRow("SELECT COUNT(*) FROM cards WHERE queue = 0").Scan(&stats.NewCards)
-	_ = c.db.QueryRow("SELECT COUNT(*) FROM cards WHERE queue IN (1, 3)").Scan(&stats.LearningCards)
-	_ = c.db.QueryRow("SELECT COUNT(*) FROM cards WHERE queue = 2 AND due <= ?", dayCutoff).Scan(&stats.DueCards)
-	_ = c.db.QueryRow("SELECT COUNT(*) FROM cards WHERE queue = 2").Scan(&stats.ReviewCards)
+	if err := c.db.QueryRow("SELECT COUNT(*) FROM cards WHERE queue = 0").Scan(&stats.NewCards); err != nil {
+		return nil, fmt.Errorf("count new cards: %w", err)
+	}
+	if err := c.db.QueryRow("SELECT COUNT(*) FROM cards WHERE queue IN (1, 3)").Scan(&stats.LearningCards); err != nil {
+		return nil, fmt.Errorf("count learning cards: %w", err)
+	}
+	if err := c.db.QueryRow("SELECT COUNT(*) FROM cards WHERE queue = 2 AND due <= ?", dayCutoff).Scan(&stats.DueCards); err != nil {
+		return nil, fmt.Errorf("count due cards: %w", err)
+	}
+	if err := c.db.QueryRow("SELECT COUNT(*) FROM cards WHERE queue = 2").Scan(&stats.ReviewCards); err != nil {
+		return nil, fmt.Errorf("count review cards: %w", err)
+	}
 
 	// Count decks and models
 	decks, err := c.GetDecks()

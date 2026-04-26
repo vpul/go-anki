@@ -506,7 +506,6 @@ type answerRequest struct {
 
 // handleAnswer processes a card answer and updates its scheduling.
 func (s *Server) handleAnswer(col *collection.Collection, w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req answerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid request body")
@@ -549,7 +548,6 @@ type createDeckRequest struct {
 
 // handleCreateDeck creates a new deck.
 func (s *Server) handleCreateDeck(col *collection.Collection, w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req createDeckRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid request body")
@@ -578,7 +576,6 @@ type addNoteRequest struct {
 
 // handleAddNote creates a new note and its associated cards.
 func (s *Server) handleAddNote(col *collection.Collection, w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req addNoteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid request body")
@@ -628,18 +625,18 @@ func (s *Server) handleSyncDownload(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	if err := client.Authenticate(ctx); err != nil {
-		errorResponse(w, http.StatusUnauthorized, fmt.Sprintf("authenticate: %v", err))
+		errorResponse(w, http.StatusUnauthorized, "sync authentication failed")
 		return
 	}
 
-	result, err := client.FullDownload(ctx, s.dbPath, s.mediaDir)
+	_, err = client.FullDownload(ctx, s.dbPath, s.mediaDir)
 	if err != nil {
 		errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 		return
 	}
 
 	// Count cards in the downloaded collection
-	var cardCount int
+	cardCount := 0
 	col, err := collection.Open(s.dbPath, collection.ReadOnly)
 	if err != nil {
 		log.Printf("warning: open collection after download: %v", err)
@@ -656,7 +653,6 @@ func (s *Server) handleSyncDownload(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, map[string]interface{}{
 		"status": "ok",
 		"cards":  cardCount,
-		"path":   result.DBPath,
 	})
 }
 
@@ -675,7 +671,7 @@ func (s *Server) handleSyncUpload(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	if err := client.Authenticate(ctx); err != nil {
-		errorResponse(w, http.StatusUnauthorized, fmt.Sprintf("authenticate: %v", err))
+		errorResponse(w, http.StatusUnauthorized, "sync authentication failed")
 		return
 	}
 

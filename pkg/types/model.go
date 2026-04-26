@@ -3,6 +3,7 @@ package types
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // Model (Note Type) represents an Anki note type. Stored as JSON in col table.
@@ -77,32 +78,10 @@ func RenderCard(fields map[string]string, tmpl *ModelTemplate) (question, answer
 func renderTemplate(tmpl string, fields map[string]string) string {
 	result := tmpl
 	for name, value := range fields {
-		result = replaceAll(result, "{{"+name+"}}", value)
+		result = strings.ReplaceAll(result, "{{"+name+"}}", value)
 	}
-	// Remove any unmatched {{...}} placeholders
-	// This is a simplified renderer - Anki's actual renderer handles
-	// conditional templates, but for basic card display this is sufficient.
+	// Unmatched {{...}} placeholders are left verbatim.
+	// A full renderer would handle conditionals and cloze deletions,
+	// but basic field substitution is sufficient for card display.
 	return result
-}
-
-func replaceAll(s, old, new string) string {
-	// Simple string replacement
-	result := ""
-	for {
-		idx := indexOf(s, old)
-		if idx == -1 {
-			return result + s
-		}
-		result += s[:idx] + new
-		s = s[idx+len(old):]
-	}
-}
-
-func indexOf(s, substr string) int {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
 }
