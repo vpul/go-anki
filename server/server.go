@@ -10,10 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
+	stdsync "sync"
 	"time"
 
 	goanki "github.com/vpul/go-anki/pkg/types"
@@ -78,18 +80,96 @@ func WithAuthToken(token string) ServerOption {
 	}
 }
 
+// WithRateLimit sets the maximum requests per minute per IP address.
+// A value of 0 or less disables rate limiting. Default is 60 RPM.
+func WithRateLimit(requestsPerMinute int) ServerOption {
+	return func(s *Server) {
+		s.rateLimit = requestsPerMinute
+	}
+}
+
+// rateLimiter implements a per-IP sliding window rate limiter.
+type rateLimiter struct {
+	mu       stdsync.Mutex
+	requests map[string][]time.Time
+	limit    int // requests per minute
+}
+
+// rateLimitResult indicates whether a request is allowed.
+type rateLimitResult struct {
+	allowed   bool
+	retryAfter time.Duration // seconds until next request is allowed
+}
+
+// allow checks if a request from the given IP is allowed.
+func (rl *rateLimiter) allow(ip string) rateLimitResult {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	windowStart := now.Add(-time.Minute)
+
+	// Evict old entries for this IP
+	timestamps := rl.requests[ip]
+	valid := timestamps[:0]
+	for _, t := range timestamps {
+		if t.After(windowStart) {
+			valid = append(valid, t)
+		}
+	}
+
+	if len(valid) >= rl.limit {
+		rl.requests[ip] = valid
+		// Calculate when the oldest request expires
+		retryAfter := time.Until(valid[0].Add(time.Minute)).Seconds()
+		if retryAfter < 0 {
+			retryAfter = 0
+		}
+		return rateLimitResult{allowed: false, retryAfter: time.Duration(retryAfter * float64(time.Second))}
+	}
+
+	valid = append(valid, now)
+	rl.requests[ip] = valid
+	return rateLimitResult{allowed: true}
+}
+
+// cleanup removes expired entries from the rate limiter.
+func (rl *rateLimiter) cleanup() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	windowStart := now.Add(-time.Minute)
+
+	for ip, timestamps := range rl.requests {
+		valid := timestamps[:0]
+		for _, t := range timestamps {
+			if t.After(windowStart) {
+				valid = append(valid, t)
+			}
+		}
+		if len(valid) == 0 {
+			delete(rl.requests, ip)
+		} else {
+			rl.requests[ip] = valid
+		}
+	}
+}
+
 // Server is an HTTP API server wrapping go-anki collection operations.
 type Server struct {
-	dbPath       string
-	mediaDir     string
-	syncConfig   *goanki.SyncConfig
-	port         int
-	scheduler    collection.Scheduler
-	readTimeout  time.Duration
-	writeTimeout time.Duration
-	idleTimeout  time.Duration
+	dbPath        string
+	mediaDir      string
+	syncConfig    *goanki.SyncConfig
+	port          int
+	scheduler     collection.Scheduler
+	readTimeout   time.Duration
+	writeTimeout  time.Duration
+	idleTimeout   time.Duration
 	authTokenHash []byte
-	closeCh      chan struct{}
+	rateLimit     int // requests per minute per IP; 0 = disabled
+	closeCh       chan struct{}
+	limiter       *rateLimiter
 }
 
 // NewServer creates a new Server with the given database path and options.
@@ -101,6 +181,7 @@ func NewServer(dbPath string, opts ...ServerOption) *Server {
 		readTimeout:  5 * time.Second,
 		writeTimeout: 10 * time.Second,
 		idleTimeout:  60 * time.Second,
+		rateLimit:    60, // default 60 RPM
 		closeCh:      make(chan struct{}),
 	}
 	for _, opt := range opts {
@@ -213,6 +294,37 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 	})
 }
 
+// rateLimitMiddleware applies per-IP rate limiting.
+func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
+	// If rate limiting is disabled, pass through
+	if s.rateLimit <= 0 {
+		return next
+	}
+
+	// Create the rate limiter if not yet initialized
+	if s.limiter == nil {
+		s.limiter = &rateLimiter{
+			requests: make(map[string][]time.Time),
+			limit:    s.rateLimit,
+		}
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ip, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			ip = r.RemoteAddr
+		}
+
+		result := s.limiter.allow(ip)
+		if !result.allowed {
+			w.Header().Set("Retry-After", strconv.Itoa(int(result.retryAfter.Seconds()+0.5)))
+			errorResponse(w, http.StatusTooManyRequests, "rate limit exceeded")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // handleHealth returns the server health status.
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	jsonResponse(w, map[string]string{"status": "ok"})
@@ -241,13 +353,37 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/sync/download", s.handleSyncDownload)
 	mux.HandleFunc("POST /api/v1/sync/upload", s.handleSyncUpload)
 
-	return s.requireAuth(maxBodySize(mux))
+	return s.rateLimitMiddleware(s.requireAuth(maxBodySize(mux)))
 }
 
 // ListenAndServe starts the HTTP server on the configured port.
 func (s *Server) ListenAndServe() error {
 	addr := fmt.Sprintf(":%d", s.port)
 	log.Printf("go-anki server listening on %s", addr)
+
+	// Start rate limiter cleanup goroutine if rate limiting is enabled
+	if s.rateLimit > 0 {
+		// Ensure limiter is initialized
+		if s.limiter == nil {
+			s.limiter = &rateLimiter{
+				requests: make(map[string][]time.Time),
+				limit:    s.rateLimit,
+			}
+		}
+		go func() {
+			ticker := time.NewTicker(5 * time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					s.limiter.cleanup()
+				case <-s.closeCh:
+					return
+				}
+			}
+		}()
+	}
+
 	srv := &http.Server{
 		Addr:         addr,
 		Handler:      s.Handler(),

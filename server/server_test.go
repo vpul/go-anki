@@ -716,3 +716,148 @@ func TestHealthEndpointNoAuth(t *testing.T) {
 		t.Errorf("expected status 'ok', got %q", resp["status"])
 	}
 }
+
+func TestRateLimitMiddleware(t *testing.T) {
+	srv, _ := setupServer(t)
+	srv.rateLimit = 3 // Low limit for testing
+	srv.limiter = &rateLimiter{
+		requests: make(map[string][]time.Time),
+		limit:    3,
+	}
+	handler := srv.Handler()
+
+	// First 3 requests should succeed
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/health", nil)
+		req.RemoteAddr = "1.2.3.4:12345"
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Errorf("request %d: expected status 200, got %d", i+1, w.Code)
+		}
+	}
+
+	// 4th request should be rate limited
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.RemoteAddr = "1.2.3.4:12345"
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusTooManyRequests {
+		t.Errorf("expected status 429, got %d", w.Code)
+	}
+
+	// Different IP should not be rate limited
+	req = httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.RemoteAddr = "5.6.7.8:12345"
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("different IP: expected status 200, got %d", w.Code)
+	}
+}
+
+func TestRateLimitDisabled(t *testing.T) {
+	srv, _ := setupServer(t)
+	srv.rateLimit = 0 // disabled
+	handler := srv.Handler()
+
+	// Should allow many requests without rate limiting
+	for i := 0; i < 100; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/health", nil)
+		req.RemoteAddr = "1.2.3.4:12345"
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Errorf("request %d: expected status 200, got %d", i, w.Code)
+			break
+		}
+	}
+}
+
+func TestRateLimitResponseFormat(t *testing.T) {
+	srv, _ := setupServer(t)
+	srv.rateLimit = 1
+	srv.limiter = &rateLimiter{
+		requests: make(map[string][]time.Time),
+		limit:    1,
+	}
+	handler := srv.Handler()
+
+	// Use up the quota
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.RemoteAddr = "1.2.3.4:12345"
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	// Next request should be 429 with JSON error
+	req = httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.RemoteAddr = "1.2.3.4:12345"
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected status 429, got %d", w.Code)
+	}
+
+	var resp map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["error"] != "rate limit exceeded" {
+		t.Errorf("expected error 'rate limit exceeded', got %q", resp["error"])
+	}
+}
+
+func TestRateLimiterAllow(t *testing.T) {
+	rl := &rateLimiter{
+		requests: make(map[string][]time.Time),
+		limit:    2,
+	}
+
+	// First request should be allowed
+	result := rl.allow("1.2.3.4")
+	if !result.allowed {
+		t.Error("first request should be allowed")
+	}
+
+	// Second request should be allowed
+	result = rl.allow("1.2.3.4")
+	if !result.allowed {
+		t.Error("second request should be allowed")
+	}
+
+	// Third request should be rate limited
+	result = rl.allow("1.2.3.4")
+	if result.allowed {
+		t.Error("third request should be rate limited")
+	}
+
+	// Different IP should be allowed
+	result = rl.allow("5.6.7.8")
+	if !result.allowed {
+		t.Error("different IP should be allowed")
+	}
+}
+
+func TestRateLimiterCleanup(t *testing.T) {
+	rl := &rateLimiter{
+		requests: make(map[string][]time.Time),
+		limit:    100,
+	}
+
+	// Add an old entry
+	rl.requests["1.2.3.4"] = []time.Time{time.Now().Add(-2 * time.Minute)}
+	rl.requests["5.6.7.8"] = []time.Time{time.Now()}
+
+	rl.cleanup()
+
+	// Old entry should be removed
+	if _, ok := rl.requests["1.2.3.4"]; ok {
+		t.Error("expired IP should be cleaned up")
+	}
+
+	// Recent entry should remain
+	if _, ok := rl.requests["5.6.7.8"]; !ok {
+		t.Error("recent IP should not be cleaned up")
+	}
+}
