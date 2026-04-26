@@ -335,21 +335,24 @@ func runSyncDownload() error {
 	fs := flag.NewFlagSet("sync download", flag.ExitOnError)
 	db := fs.String("db", "collection.anki2", "path to collection database")
 	media := fs.String("media", "collection.media", "media directory path")
-	username := fs.String("username", envOr("ANKIWEB_USERNAME", ""), "AnkiWeb username (or $ANKIWEB_USERNAME)")
-	password := fs.String("password", envOr("ANKIWEB_PASSWORD", ""), "AnkiWeb password (or $ANKIWEB_PASSWORD)")
+	username := fs.String("username", envOr("ANKIWEB_USERNAME", ""), "AnkiWeb username (or set $ANKIWEB_USERNAME)")
+	password := envOr("ANKIWEB_PASSWORD", "")
 	timeout := fs.Duration("timeout", 5*time.Minute, "sync timeout")
 	if err := fs.Parse(reorderFlags(os.Args[3:], boolFlagsFor(fs))); err != nil {
 		return fmt.Errorf("parse flags: %w", err)
 	}
 
-	if *username == "" || *password == "" {
-		return fmt.Errorf("--username and --password are required for sync (or set ANKIWEB_USERNAME/ANKIWEB_PASSWORD)")
+	if *username == "" || password == "" {
+		return fmt.Errorf("ANKIWEB_USERNAME and ANKIWEB_PASSWORD environment variables are required for sync")
 	}
 
-	client := sync.NewClient(goanki.SyncConfig{
+	client, err := sync.NewClient(goanki.SyncConfig{
 		Username: *username,
-		Password: *password,
+		Password: password,
 	})
+	if err != nil {
+		return fmt.Errorf("create sync client: %w", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
@@ -388,21 +391,24 @@ func runSyncUpload() error {
 	fs := flag.NewFlagSet("sync upload", flag.ExitOnError)
 	db := fs.String("db", "collection.anki2", "path to collection database")
 	media := fs.String("media", "collection.media", "media directory path")
-	username := fs.String("username", envOr("ANKIWEB_USERNAME", ""), "AnkiWeb username (or $ANKIWEB_USERNAME)")
-	password := fs.String("password", envOr("ANKIWEB_PASSWORD", ""), "AnkiWeb password (or $ANKIWEB_PASSWORD)")
+	username := fs.String("username", envOr("ANKIWEB_USERNAME", ""), "AnkiWeb username (or set $ANKIWEB_USERNAME)")
+	password := envOr("ANKIWEB_PASSWORD", "")
 	timeout := fs.Duration("timeout", 5*time.Minute, "sync timeout")
 	if err := fs.Parse(reorderFlags(os.Args[3:], boolFlagsFor(fs))); err != nil {
 		return fmt.Errorf("parse flags: %w", err)
 	}
 
-	if *username == "" || *password == "" {
-		return fmt.Errorf("--username and --password are required for sync (or set ANKIWEB_USERNAME/ANKIWEB_PASSWORD)")
+	if *username == "" || password == "" {
+		return fmt.Errorf("ANKIWEB_USERNAME and ANKIWEB_PASSWORD environment variables are required for sync")
 	}
 
-	client := sync.NewClient(goanki.SyncConfig{
+	client, err := sync.NewClient(goanki.SyncConfig{
 		Username: *username,
-		Password: *password,
+		Password: password,
 	})
+	if err != nil {
+		return fmt.Errorf("create sync client: %w", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
@@ -426,7 +432,7 @@ func runServe() error {
 	media := fs.String("media", "collection.media", "media directory path")
 	port := fs.Int("port", 8765, "HTTP server port")
 	username := fs.String("username", envOr("ANKIWEB_USERNAME", ""), "AnkiWeb username (optional, enables sync endpoints)")
-	password := fs.String("password", envOr("ANKIWEB_PASSWORD", ""), "AnkiWeb password (optional, enables sync endpoints)")
+	password := envOr("ANKIWEB_PASSWORD", "")
 	if err := fs.Parse(reorderFlags(os.Args[2:], boolFlagsFor(fs))); err != nil {
 		return fmt.Errorf("parse flags: %w", err)
 	}
@@ -441,10 +447,10 @@ func runServe() error {
 		server.WithScheduler(scheduler.NewFSRSScheduler()),
 	}
 
-	if *username != "" && *password != "" {
+	if *username != "" && password != "" {
 		opts = append(opts, server.WithSyncConfig(goanki.SyncConfig{
 			Username: *username,
-			Password: *password,
+			Password: password,
 		}))
 	}
 

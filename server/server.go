@@ -4,18 +4,30 @@
 package server
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"regexp"
 	"strconv"
+	"strings"
+	stdsync "sync"
+	"time"
 
 	goanki "github.com/vpul/go-anki/pkg/types"
 
 	"github.com/vpul/go-anki/pkg/collection"
 	"github.com/vpul/go-anki/pkg/scheduler"
 	"github.com/vpul/go-anki/pkg/sync"
+)
+
+const (
+	// maxBodyBytes is the maximum allowed request body size (1MB).
+	maxBodyBytes int64 = 1 << 20
 )
 
 // ServerOption is a functional option for configuring a Server.
@@ -49,26 +61,172 @@ func WithScheduler(sched collection.Scheduler) ServerOption {
 	}
 }
 
+// WithServerTimeouts sets the HTTP server timeouts.
+func WithServerTimeouts(read, write, idle time.Duration) ServerOption {
+	return func(s *Server) {
+		s.readTimeout = read
+		s.writeTimeout = write
+		s.idleTimeout = idle
+	}
+}
+
+// WithAuthToken sets the bearer token for authenticating requests.
+// When configured, all endpoints except GET /health require a valid
+// Authorization: Bearer <token> header. The token is stored as a SHA-256 hash.
+func WithAuthToken(token string) ServerOption {
+	return func(s *Server) {
+		hash := sha256.Sum256([]byte(token))
+		s.authTokenHash = hash[:]
+	}
+}
+
+// WithRateLimit sets the maximum requests per minute per IP address.
+// A value of 0 or less disables rate limiting. Default is 60 RPM.
+func WithRateLimit(requestsPerMinute int) ServerOption {
+	return func(s *Server) {
+		s.rateLimit = requestsPerMinute
+	}
+}
+
+// rateLimiter implements a per-IP sliding window rate limiter.
+type rateLimiter struct {
+	mu       stdsync.Mutex
+	requests map[string][]time.Time
+	limit    int // requests per minute
+}
+
+// rateLimitResult indicates whether a request is allowed.
+type rateLimitResult struct {
+	allowed   bool
+	retryAfter time.Duration // seconds until next request is allowed
+}
+
+// allow checks if a request from the given IP is allowed.
+func (rl *rateLimiter) allow(ip string) rateLimitResult {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	windowStart := now.Add(-time.Minute)
+
+	// Evict old entries for this IP
+	timestamps := rl.requests[ip]
+	valid := timestamps[:0]
+	for _, t := range timestamps {
+		if t.After(windowStart) {
+			valid = append(valid, t)
+		}
+	}
+
+	if len(valid) >= rl.limit {
+		rl.requests[ip] = valid
+		// Calculate when the oldest request expires
+		retryAfter := time.Until(valid[0].Add(time.Minute)).Seconds()
+		if retryAfter < 0 {
+			retryAfter = 0
+		}
+		return rateLimitResult{allowed: false, retryAfter: time.Duration(retryAfter * float64(time.Second))}
+	}
+
+	valid = append(valid, now)
+	rl.requests[ip] = valid
+	return rateLimitResult{allowed: true}
+}
+
+// cleanup removes expired entries from the rate limiter.
+func (rl *rateLimiter) cleanup() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	windowStart := now.Add(-time.Minute)
+
+	for ip, timestamps := range rl.requests {
+		valid := timestamps[:0]
+		for _, t := range timestamps {
+			if t.After(windowStart) {
+				valid = append(valid, t)
+			}
+		}
+		if len(valid) == 0 {
+			delete(rl.requests, ip)
+		} else {
+			rl.requests[ip] = valid
+		}
+	}
+}
+
 // Server is an HTTP API server wrapping go-anki collection operations.
 type Server struct {
-	dbPath     string
-	mediaDir   string
-	syncConfig *goanki.SyncConfig
-	port       int
-	scheduler  collection.Scheduler
+	dbPath        string
+	mediaDir      string
+	syncConfig    *goanki.SyncConfig
+	port          int
+	scheduler     collection.Scheduler
+	readTimeout   time.Duration
+	writeTimeout  time.Duration
+	idleTimeout   time.Duration
+	authTokenHash []byte
+	rateLimit     int // requests per minute per IP; 0 = disabled
+	closeCh       chan struct{}
+	limiter       *rateLimiter
 }
 
 // NewServer creates a new Server with the given database path and options.
 func NewServer(dbPath string, opts ...ServerOption) *Server {
 	s := &Server{
-		dbPath:    dbPath,
-		port:      8765,
-		scheduler: scheduler.NewFSRSScheduler(),
+		dbPath:       dbPath,
+		port:         8765,
+		scheduler:    scheduler.NewFSRSScheduler(),
+		readTimeout:  5 * time.Second,
+		writeTimeout: 10 * time.Second,
+		idleTimeout:  60 * time.Second,
+		rateLimit:    60, // default 60 RPM
+		closeCh:      make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(s)
 	}
 	return s
+}
+
+//sanitizeErr sanitizes error messages for 500 status responses.
+// It removes internal details like file paths, SQL keywords, and
+// SQLite error patterns that should not be exposed to clients.
+func sanitizeErr(err error) string {
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+
+	// Patterns that indicate internal details should be hidden entirely.
+	// Checked BEFORE the "not found" shortcut so that errors like
+	// "SELECT * FROM cards WHERE id=5: record not found" are sanitized
+	// as "internal error" rather than leaking SQL.
+	pathPattern := regexp.MustCompile(`[/\\][\w._-]+`)
+	sqlKeywords := []string{"SELECT ", "INSERT ", "UPDATE ", "DELETE ", "WHERE ", "select ", "insert ", "update ", "delete ", "where "}
+	sqlitePatterns := []string{"SQL logic error", "database is locked", "disk I/O error"}
+
+	if pathPattern.MatchString(msg) {
+		return "internal error"
+	}
+	for _, kw := range sqlKeywords {
+		if strings.Contains(msg, kw) {
+			return "internal error"
+		}
+	}
+	for _, pat := range sqlitePatterns {
+		if strings.Contains(lower, strings.ToLower(pat)) {
+			return "internal error"
+		}
+	}
+
+	// "not found" errors are safe to surface only after checking for SQL/path leaks
+	if strings.Contains(lower, "not found") {
+		return "not found"
+	}
+
+	// For other errors, strip any path-like content but return the rest
+	sanitized := pathPattern.ReplaceAllString(msg, "[redacted]")
+	return sanitized
 }
 
 // errorResponse writes a JSON error response with the given status code.
@@ -90,7 +248,7 @@ func (s *Server) withMode(mode collection.OpenMode, fn func(col *collection.Coll
 	return func(w http.ResponseWriter, r *http.Request) {
 		col, err := collection.Open(s.dbPath, mode)
 		if err != nil {
-			errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("open collection: %v", err))
+			errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 			return
 		}
 		defer func() { _ = col.Close() }()
@@ -98,9 +256,91 @@ func (s *Server) withMode(mode collection.OpenMode, fn func(col *collection.Coll
 	}
 }
 
+// maxBodySize is middleware that limits the request body size for all requests.
+func maxBodySize(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// requireAuth is middleware that checks the Authorization: Bearer <token> header
+// against the hashed auth token. If no token is configured, auth is not required.
+func (s *Server) requireAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(s.authTokenHash) == 0 {
+			// No auth configured — allow everything
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Health endpoint is always accessible
+		if r.Method == http.MethodGet && r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		authHeader := r.Header.Get("Authorization")
+		if !strings.HasPrefix(authHeader, "Bearer ") {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			errorResponse(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		token := strings.TrimPrefix(authHeader, "Bearer ")
+		tokenHash := sha256.Sum256([]byte(token))
+		if subtle.ConstantTimeCompare(tokenHash[:], s.authTokenHash) != 1 {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			errorResponse(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// rateLimitMiddleware applies per-IP rate limiting.
+func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
+	// If rate limiting is disabled, pass through
+	if s.rateLimit <= 0 {
+		return next
+	}
+
+	// Create the rate limiter if not yet initialized
+	if s.limiter == nil {
+		s.limiter = &rateLimiter{
+			requests: make(map[string][]time.Time),
+			limit:    s.rateLimit,
+		}
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ip, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			ip = r.RemoteAddr
+		}
+
+		result := s.limiter.allow(ip)
+		if !result.allowed {
+			w.Header().Set("Retry-After", strconv.Itoa(int(result.retryAfter.Seconds()+0.5)))
+			errorResponse(w, http.StatusTooManyRequests, "rate limit exceeded")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// handleHealth returns the server health status.
+func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	jsonResponse(w, map[string]string{"status": "ok"})
+}
+
 // Handler returns an http.Handler with all API routes registered.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+
+	// Health check endpoint (no auth required)
+	mux.HandleFunc("GET /health", s.handleHealth)
 
 	// Read endpoints
 	mux.HandleFunc("GET /api/v1/version", s.handleVersion)
@@ -118,14 +358,58 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/sync/download", s.handleSyncDownload)
 	mux.HandleFunc("POST /api/v1/sync/upload", s.handleSyncUpload)
 
-	return mux
+	return s.rateLimitMiddleware(s.requireAuth(maxBodySize(mux)))
 }
 
 // ListenAndServe starts the HTTP server on the configured port.
 func (s *Server) ListenAndServe() error {
 	addr := fmt.Sprintf(":%d", s.port)
 	log.Printf("go-anki server listening on %s", addr)
-	return http.ListenAndServe(addr, s.Handler())
+
+	// Start rate limiter cleanup goroutine if rate limiting is enabled
+	if s.rateLimit > 0 {
+		// Ensure limiter is initialized
+		if s.limiter == nil {
+			s.limiter = &rateLimiter{
+				requests: make(map[string][]time.Time),
+				limit:    s.rateLimit,
+			}
+		}
+		go func() {
+			ticker := time.NewTicker(5 * time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					s.limiter.cleanup()
+				case <-s.closeCh:
+					return
+				}
+			}
+		}()
+	}
+
+	srv := &http.Server{
+		Addr:         addr,
+		Handler:      s.Handler(),
+		ReadTimeout:  s.readTimeout,
+		WriteTimeout: s.writeTimeout,
+		IdleTimeout:  s.idleTimeout,
+	}
+	return srv.ListenAndServe()
+}
+
+// Close shuts down the server gracefully, stopping the rate limiter cleanup goroutine.
+// It signals the closeCh to stop background goroutines and then closes the HTTP server.
+func (s *Server) Close() error {
+	// Signal background goroutines to stop
+	select {
+	case <-s.closeCh:
+		// Already closed
+	default:
+		close(s.closeCh)
+	}
+	return nil
 }
 
 // handleVersion returns the server version.
@@ -137,7 +421,7 @@ func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleGetDecks(col *collection.Collection, w http.ResponseWriter, _ *http.Request) {
 	decks, err := col.GetDecks()
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("get decks: %v", err))
+		errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 		return
 	}
 	// Convert map to slice for JSON array response
@@ -150,22 +434,26 @@ func (s *Server) handleGetDecks(col *collection.Collection, w http.ResponseWrite
 
 // handleGetDueCards returns cards that are due for review.
 func (s *Server) handleGetDueCards(col *collection.Collection, w http.ResponseWriter, r *http.Request) {
-	filter := goanki.DueCardsFilter{
-		Limit: 20,
-	}
+	filter := goanki.DueCardsFilter{}
 
 	if deck := r.URL.Query().Get("deck"); deck != "" {
 		filter.DeckName = deck
 	}
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-		if n, err := strconv.Atoi(limitStr); err == nil && n > 0 {
+		if n, err := strconv.Atoi(limitStr); err == nil {
 			filter.Limit = n
 		}
+	}
+	if filter.Limit <= 0 {
+		filter.Limit = 100
+	}
+	if filter.Limit > 1000 {
+		filter.Limit = 1000
 	}
 
 	cards, err := col.GetDueCards(filter)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("get due cards: %v", err))
+		errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 		return
 	}
 	jsonResponse(w, map[string]interface{}{"cards": cards})
@@ -175,7 +463,7 @@ func (s *Server) handleGetDueCards(col *collection.Collection, w http.ResponseWr
 func (s *Server) handleGetStats(col *collection.Collection, w http.ResponseWriter, _ *http.Request) {
 	stats, err := col.GetStats()
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("get stats: %v", err))
+		errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 		return
 	}
 	jsonResponse(w, map[string]interface{}{"stats": stats})
@@ -195,7 +483,7 @@ func (s *Server) handleGetCardByID(col *collection.Collection, w http.ResponseWr
 		if errors.Is(err, collection.ErrNotFound) {
 			errorResponse(w, http.StatusNotFound, fmt.Sprintf("card %d not found", id))
 		} else {
-			errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("get card: %v", err))
+			errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 		}
 		return
 	}
@@ -236,7 +524,7 @@ func (s *Server) handleAnswer(col *collection.Collection, w http.ResponseWriter,
 		if errors.Is(err, collection.ErrNotFound) {
 			errorResponse(w, http.StatusNotFound, fmt.Sprintf("card %d not found", req.CardID))
 		} else {
-			errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("answer card: %v", err))
+			errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 		}
 		return
 	}
@@ -266,7 +554,7 @@ func (s *Server) handleCreateDeck(col *collection.Collection, w http.ResponseWri
 
 	deckID, err := col.CreateDeck(req.Name)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("create deck: %v", err))
+		errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 		return
 	}
 	jsonResponse(w, map[string]interface{}{"deck_id": deckID})
@@ -311,7 +599,7 @@ func (s *Server) handleAddNote(col *collection.Collection, w http.ResponseWriter
 
 	noteID, err := col.AddNote(input)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("add note: %v", err))
+		errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 		return
 	}
 	jsonResponse(w, map[string]interface{}{"note_id": noteID})
@@ -324,7 +612,11 @@ func (s *Server) handleSyncDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := sync.NewClient(*s.syncConfig)
+	client, err := sync.NewClient(*s.syncConfig)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("create sync client: %v", err))
+		return
+	}
 	ctx := r.Context()
 
 	if err := client.Authenticate(ctx); err != nil {
@@ -334,7 +626,7 @@ func (s *Server) handleSyncDownload(w http.ResponseWriter, r *http.Request) {
 
 	result, err := client.FullDownload(ctx, s.dbPath, s.mediaDir)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("download: %v", err))
+		errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 		return
 	}
 
@@ -367,7 +659,11 @@ func (s *Server) handleSyncUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := sync.NewClient(*s.syncConfig)
+	client, err := sync.NewClient(*s.syncConfig)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("create sync client: %v", err))
+		return
+	}
 	ctx := r.Context()
 
 	if err := client.Authenticate(ctx); err != nil {
@@ -376,7 +672,7 @@ func (s *Server) handleSyncUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := client.FullUpload(ctx, s.dbPath, s.mediaDir); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("upload: %v", err))
+		errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 		return
 	}
 

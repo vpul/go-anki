@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -41,6 +42,14 @@ import (
 
 	goanki "github.com/vpul/go-anki/pkg/apkg"
 	goankitypes "github.com/vpul/go-anki/pkg/types"
+)
+
+const (
+	// maxDownloadSize is the maximum size (500MB) of a response body from AnkiWeb.
+	maxDownloadSize int64 = 500 * 1024 * 1024
+
+	// downloadTimeout is the overall timeout for download operations.
+	downloadTimeout = 5 * time.Minute
 )
 
 const (
@@ -77,32 +86,47 @@ type DownloadResult struct {
 // Client is an AnkiWeb sync client.
 type Client struct {
 	config     goankitypes.SyncConfig
+	password   string // unexported to prevent leaking via JSON/string representations
 	baseURL    string
 	httpClient *http.Client
 	sessionKey string
 }
 
+// SetPassword sets the sync password. Use this instead of setting Password
+// directly on SyncConfig to keep the credential in an unexported field.
+func (c *Client) SetPassword(pw string) {
+	c.password = pw
+}
+
 // NewClient creates a new AnkiWeb sync client with the given configuration.
-func NewClient(config goankitypes.SyncConfig) *Client {
+func NewClient(config goankitypes.SyncConfig) (*Client, error) {
+	if err := validateURL(DefaultSyncURL); err != nil {
+		return nil, fmt.Errorf("validate default sync URL: %w", err)
+	}
 	return &Client{
-		config:  config,
-		baseURL: DefaultSyncURL,
+		config:   config,
+		password: config.Password,
+		baseURL:  DefaultSyncURL,
 		httpClient: &http.Client{
 			Timeout: 5 * time.Minute, // Large downloads may take time
 		},
-	}
+	}, nil
 }
 
 // NewClientWithURL creates a new AnkiWeb sync client with a custom base URL.
 // This is useful for testing against a local ankisyncd server.
-func NewClientWithURL(config goankitypes.SyncConfig, baseURL string) *Client {
+func NewClientWithURL(config goankitypes.SyncConfig, baseURL string) (*Client, error) {
+	if err := validateURL(baseURL); err != nil {
+		return nil, fmt.Errorf("validate sync URL: %w", err)
+	}
 	return &Client{
-		config:  config,
-		baseURL: baseURL,
+		config:   config,
+		password: config.Password,
+		baseURL:  baseURL,
 		httpClient: &http.Client{
 			Timeout: 5 * time.Minute,
 		},
-	}
+	}, nil
 }
 
 // SetHTTPClient sets a custom HTTP client for the sync operations.
@@ -142,7 +166,7 @@ func (c *Client) Authenticate(ctx context.Context) error {
 
 	data := url.Values{}
 	data.Set("u", c.config.Username)
-	data.Set("p", c.config.Password)
+	data.Set("p", c.password)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, authURL, bytes.NewBufferString(data.Encode()))
 	if err != nil {
@@ -239,6 +263,10 @@ func (c *Client) FullDownload(ctx context.Context, dbPath string, mediaDir strin
 		return nil, fmt.Errorf("not authenticated; call Authenticate() first")
 	}
 
+	// Apply overall download timeout
+	dlCtx, cancel := context.WithTimeout(ctx, downloadTimeout)
+	defer cancel()
+
 	// Create temporary file for the downloaded .colpkg
 	tmpDir, err := os.MkdirTemp("", "anki-sync-download-*")
 	if err != nil {
@@ -261,7 +289,7 @@ func (c *Client) FullDownload(ctx context.Context, dbPath string, mediaDir strin
 		return nil, fmt.Errorf("marshal download request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, syncURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(dlCtx, http.MethodPost, syncURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create download request: %w", err)
 	}
@@ -288,17 +316,25 @@ func (c *Client) FullDownload(ctx context.Context, dbPath string, mediaDir strin
 		usn, _ = strconv.Atoi(v)
 	}
 
+	// Wrap the response body with a LimitedReader to enforce max download size
+	limitedReader := &io.LimitedReader{R: resp.Body, N: maxDownloadSize}
+
 	// Save the .colpkg to temp file
 	colpkgFile, err := os.Create(colpkgPath)
 	if err != nil {
 		return nil, fmt.Errorf("create temp colpkg file: %w", err)
 	}
 
-	if _, err := io.Copy(colpkgFile, resp.Body); err != nil {
+	if _, err := io.Copy(colpkgFile, limitedReader); err != nil {
 		_ = colpkgFile.Close()
 		return nil, fmt.Errorf("save downloaded colpkg: %w", err)
 	}
 	_ = colpkgFile.Close()
+
+	// Check if we hit the download size limit
+	if limitedReader.N <= 0 {
+		return nil, fmt.Errorf("download exceeded maximum size of %d bytes", maxDownloadSize)
+	}
 
 	// Extract the .colpkg using the existing ImportColpkg function
 	result, err := goanki.ImportColpkg(colpkgPath, filepath.Dir(dbPath))
@@ -348,6 +384,96 @@ func (c *Client) FullDownload(ctx context.Context, dbPath string, mediaDir strin
 		MediaDir:            mediaDir,
 		MediaFilesImported:   result.MediaFilesImported,
 	}, nil
+}
+
+// validateURL checks that a URL is safe to connect to, preventing SSRF attacks.
+// It requires HTTPS scheme (or HTTP only for localhost/loopback), and blocks
+// connections to private/reserved IP ranges.
+func validateURL(u string) error {
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return fmt.Errorf("parse URL: %w", err)
+	}
+
+	// Require HTTPS unless hostname is localhost or loopback
+	isLocalhost := parsed.Hostname() == "localhost" || parsed.Hostname() == "127.0.0.1" || parsed.Hostname() == "::1"
+	switch parsed.Scheme {
+	case "https":
+		// ok
+	case "http":
+		if !isLocalhost {
+			return fmt.Errorf("insecure URL scheme %q: only https is allowed for remote hosts", parsed.Scheme)
+		}
+	default:
+		return fmt.Errorf("unsupported URL scheme %q: must be http or https", parsed.Scheme)
+	}
+
+	hostname := parsed.Hostname()
+	if hostname == "" {
+		return fmt.Errorf("URL has no hostname")
+	}
+
+	// Resolve hostname to catch DNS-based SSRF
+	addrs, err := net.LookupHost(hostname)
+	if err != nil {
+		return fmt.Errorf("resolve hostname %q: %w", hostname, err)
+	}
+
+	for _, addr := range addrs {
+		ip := net.ParseIP(addr)
+		if ip == nil {
+			return fmt.Errorf("resolved non-IP address %q for hostname %q", addr, hostname)
+		}
+		// Normalize to 4-byte form for IPv4 addresses. This converts
+		// ::ffff:a.b.c.d (IPv4-mapped IPv6) to plain 4-byte a.b.c.d, so that
+		// IPv4-mapped addresses are checked against IPv4 private ranges instead
+		// of being caught by an over-broad ::ffff:0:0/96 net.
+		if v4 := ip.To4(); v4 != nil {
+			ip = v4
+		}
+		if isPrivateIP(ip) {
+			// Allow loopback only if explicitly using localhost
+			if ip.IsLoopback() && isLocalhost {
+				continue
+			}
+			return fmt.Errorf("hostname %q resolves to private/reserved IP %s", hostname, ip)
+		}
+	}
+
+	return nil
+}
+
+// isPrivateIP checks whether an IP address is in a private or reserved range.
+func isPrivateIP(ip net.IP) bool {
+	privateRanges := []struct {
+		network *net.IPNet
+	}{
+		{mustParseCIDR("10.0.0.0/8")},
+		{mustParseCIDR("172.16.0.0/12")},
+		{mustParseCIDR("192.168.0.0/16")},
+		{mustParseCIDR("169.254.0.0/16")},
+		{mustParseCIDR("127.0.0.0/8")},
+		{mustParseCIDR("0.0.0.0/32")},
+		{mustParseCIDR("::1/128")},
+		{mustParseCIDR("fc00::/7")},  // IPv6 ULA (RFC 4193)
+		{mustParseCIDR("fe80::/10")}, // IPv6 link-local
+	}
+
+	for _, r := range privateRanges {
+		if r.network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// mustParseCIDR parses a CIDR string or panics. Used for static CIDR ranges.
+func mustParseCIDR(s string) *net.IPNet {
+	_, network, err := net.ParseCIDR(s)
+	if err != nil {
+		panic(err)
+	}
+	return network
 }
 
 // copyFile copies a file from src to dst.

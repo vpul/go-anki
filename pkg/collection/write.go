@@ -12,10 +12,63 @@ import (
 	goanki "github.com/vpul/go-anki/pkg/types"
 )
 
+// validateDeckName checks that a deck name is valid.
+func validateDeckName(name string) error {
+	if name == "" {
+		return fmt.Errorf("invalid deck name: must not be empty")
+	}
+	if len(name) > 500 {
+		return fmt.Errorf("invalid deck name: exceeds 500 characters")
+	}
+	if strings.ContainsRune(name, 0) {
+		return fmt.Errorf("invalid deck name: contains null byte")
+	}
+	if strings.ContainsRune(name, '\n') {
+		return fmt.Errorf("invalid deck name: contains newline")
+	}
+	return nil
+}
+
+// validateNote checks that a note's fields and tags are valid.
+func validateNote(note goanki.NewNote) error {
+	// At least one field must have non-empty content
+	hasContent := false
+	for _, v := range note.Fields {
+		if len(v) > 100000 {
+			return fmt.Errorf("invalid note: field exceeds 100000 characters")
+		}
+		if strings.ContainsRune(v, 0) {
+			return fmt.Errorf("invalid note: field contains null byte")
+		}
+		if v != "" {
+			hasContent = true
+		}
+	}
+	if !hasContent {
+		return fmt.Errorf("invalid note: at least one field must have content")
+	}
+	// Validate tags
+	for _, tag := range note.Tags {
+		if len(tag) > 100 {
+			return fmt.Errorf("invalid note: tag %q exceeds 100 characters", tag)
+		}
+		if strings.ContainsRune(tag, 0) {
+			return fmt.Errorf("invalid note: tag contains null byte")
+		}
+		if strings.ContainsAny(tag, " \t\r\n") {
+			return fmt.Errorf("invalid note: tag %q contains whitespace", tag)
+		}
+	}
+	return nil
+}
+
 // AnswerCard answers a card with the given rating using the FSRS scheduler.
 // It updates the card in the database and inserts a review log entry.
 // Returns the updated card and review log, or an error.
 func (c *Collection) AnswerCard(cardID int64, rating goanki.Rating, scheduler Scheduler) (*goanki.Answer, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	// Fetch the card
 	card, err := c.GetCardByID(cardID)
 	if err != nil {
@@ -81,6 +134,9 @@ func (c *Collection) AnswerCard(cardID int64, rating goanki.Rating, scheduler Sc
 // UpdateCard updates a card in the database.
 // Sets mod timestamp and marks usn=-1 (not yet synced).
 func (c *Collection) UpdateCard(card goanki.Card) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	_, err := c.db.Exec(`
 		UPDATE cards SET
 			type = ?, queue = ?, due = ?, ivl = ?, factor = ?,
@@ -99,11 +155,14 @@ func (c *Collection) UpdateCard(card goanki.Card) error {
 
 // InsertReviewLog adds a review entry to the revlog table.
 func (c *Collection) InsertReviewLog(review goanki.ReviewLog) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	_, err := c.db.Exec(`
 INSERT INTO revlog (id, cid, usn, ease, ivl, lastIvl, factor, time, type)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-	review.ID, review.CID, review.USN, int(review.Ease),
-	review.IVL, review.LastIVL, review.Factor, review.Time, int(review.Type),
+		review.ID, review.CID, review.USN, int(review.Ease),
+		review.IVL, review.LastIVL, review.Factor, review.Time, int(review.Type),
 	)
 	if err != nil {
 		return fmt.Errorf("insert review log: %w", err)
@@ -114,6 +173,18 @@ INSERT INTO revlog (id, cid, usn, ease, ivl, lastIvl, factor, time, type)
 // CreateDeck creates a new deck and returns its ID.
 // If a deck with the same name already exists, returns its ID without error.
 func (c *Collection) CreateDeck(name string) (int64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.createDeckUnlocked(name)
+}
+
+// createDeckUnlocked is the internal implementation of CreateDeck without locking.
+// It must be called with c.mu held, or from a context that already ensures serialization.
+func (c *Collection) createDeckUnlocked(name string) (int64, error) {
+	if err := validateDeckName(name); err != nil {
+		return 0, err
+	}
+
 	decks, err := c.GetDecks()
 	if err != nil {
 		return 0, fmt.Errorf("get decks: %w", err)
@@ -189,6 +260,13 @@ func (c *Collection) CreateDeck(name string) (int64, error) {
 // AddNote creates a new note and its associated cards.
 // Returns the note ID on success.
 func (c *Collection) AddNote(input goanki.NewNote) (int64, error) {
+	if err := validateNote(input); err != nil {
+		return 0, err
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	models, err := c.GetModels()
 	if err != nil {
 		return 0, fmt.Errorf("get models: %w", err)
@@ -207,8 +285,8 @@ func (c *Collection) AddNote(input goanki.NewNote) (int64, error) {
 		return 0, fmt.Errorf("model %q not found", input.ModelName)
 	}
 
-	// Find or create the deck
-	deckID, err := c.CreateDeck(input.DeckName)
+	// Find or create the deck (use unlocked version to avoid deadlock)
+	deckID, err := c.createDeckUnlocked(input.DeckName)
 	if err != nil {
 		return 0, fmt.Errorf("create/get deck: %w", err)
 	}
@@ -305,14 +383,22 @@ func dayOffsetSinceCreation(c *Collection) int64 {
 }
 
 // generateGUID creates a cryptographically random 10-character GUID for a note.
+// Uses rejection sampling to avoid modulo bias (since 256 is not evenly
+// divisible by 62, we reject bytes >= 248 and only accept bytes in [0, 248)
+// which gives uniform distribution over the 62-character alphabet).
 func generateGUID() string {
 	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	b := make([]byte, 10)
-	_, _ = rand.Read(b)
-	for i := range b {
-		b[i] = chars[b[i]%byte(len(chars))]
+	const maxByte = byte(248) // 62 * 4 = 248, giving uniform distribution
+	result := make([]byte, 10)
+	for i := 0; i < len(result); {
+		b := make([]byte, 1)
+		_, _ = rand.Read(b)
+		if b[0] < maxByte {
+			result[i] = chars[b[0]%byte(len(chars))]
+			i++
+		}
 	}
-	return string(b)
+	return string(result)
 }
 
 // fieldChecksum computes the Anki field checksum.

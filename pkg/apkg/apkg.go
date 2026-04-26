@@ -15,12 +15,16 @@ package apkg
 
 import (
 	"archive/zip"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 // ExportOptions configures how an .apkg file is created.
@@ -46,6 +50,18 @@ type ExportOptions struct {
 	// If nil and MediaDir is set, media files are auto-discovered.
 	MediaMap MediaMap
 }
+
+// Security limits for ZIP extraction.
+const (
+	// maxFileSize is the maximum allowed decompressed size for a single file (50MB).
+	maxFileSize int64 = 50 * 1024 * 1024
+
+	// maxTotalSize is the maximum allowed total decompressed size across all files (500MB).
+	maxTotalSize int64 = 500 * 1024 * 1024
+
+	// maxFileCount is the maximum number of files allowed in a ZIP archive.
+	maxFileCount = 10000
+)
 
 // ImportResult contains information about an imported .apkg or .colpkg file.
 type ImportResult struct {
@@ -152,18 +168,35 @@ func ImportApkg(apkgPath string, destDir string) (*ImportResult, error) {
 	}
 	defer func() { _ = reader.Close() }()
 
+	// Enforce file count limit
+	if len(reader.File) > maxFileCount {
+		return nil, fmt.Errorf("archive contains %d files, exceeds maximum of %d", len(reader.File), maxFileCount)
+	}
+
 	// Ensure destination directory exists
 	if err := os.MkdirAll(destDir, 0755); err != nil {
 		return nil, fmt.Errorf("create destination directory: %w", err)
 	}
 
+	var totalSize int64
+
 	// First pass: extract the collection database and parse the media map.
 	var mediaMap MediaMap
 	for _, file := range reader.File {
+		// Validate entry name for path traversal and null bytes
+		if err := validateZipEntryName(file.Name, destDir); err != nil {
+			return nil, fmt.Errorf("invalid entry %q: %w", file.Name, err)
+		}
+
 		switch file.Name {
 		case "collection.anki2", "collection.anki21b":
 			dbPath := filepath.Join(destDir, "collection.anki2")
-			if err := extractZipFile(file, dbPath); err != nil {
+			written, err := extractZipFileWithLimit(file, dbPath, maxFileSize)
+			totalSize += written
+			if totalSize > maxTotalSize {
+				return nil, fmt.Errorf("total decompressed size exceeds %d byte limit", maxTotalSize)
+			}
+			if err != nil {
 				return nil, fmt.Errorf("extract collection: %w", err)
 			}
 		case "media":
@@ -171,10 +204,15 @@ func ImportApkg(apkgPath string, destDir string) (*ImportResult, error) {
 			if err != nil {
 				return nil, fmt.Errorf("open media map: %w", err)
 			}
-			data, err := io.ReadAll(rc)
+			limited := io.LimitReader(rc, maxFileSize)
+			data, err := io.ReadAll(limited)
 			_ = rc.Close()
 			if err != nil {
 				return nil, fmt.Errorf("read media map: %w", err)
+			}
+			totalSize += int64(len(data))
+			if totalSize > maxTotalSize {
+				return nil, fmt.Errorf("total decompressed size exceeds %d byte limit", maxTotalSize)
 			}
 			_ = json.Unmarshal(data, &mediaMap)
 		}
@@ -195,11 +233,19 @@ func ImportApkg(apkgPath string, destDir string) (*ImportResult, error) {
 			if !ok {
 				continue
 			}
+			if err := validateMediaFilename(filename); err != nil {
+				return nil, fmt.Errorf("invalid media filename in archive: %w", err)
+			}
 			mediaPath := filepath.Join(mediaDir, filename)
 			if err := validatePathWithinDir(mediaPath, mediaDir); err != nil {
 				return nil, fmt.Errorf("media file path escapes destination: %s: %w", filename, err)
 			}
-			if err := extractZipFile(file, mediaPath); err != nil {
+			written, err := extractZipFileWithLimit(file, mediaPath, maxFileSize)
+			totalSize += written
+			if totalSize > maxTotalSize {
+				return nil, fmt.Errorf("total decompressed size exceeds %d byte limit", maxTotalSize)
+			}
+			if err != nil {
 				return nil, fmt.Errorf("extract media file %s: %w", filename, err)
 			}
 			result.MediaFilesImported++
@@ -222,17 +268,34 @@ func ImportColpkg(colpkgPath string, destDir string) (*ImportResult, error) {
 	}
 	defer func() { _ = reader.Close() }()
 
+	// Enforce file count limit
+	if len(reader.File) > maxFileCount {
+		return nil, fmt.Errorf("archive contains %d files, exceeds maximum of %d", len(reader.File), maxFileCount)
+	}
+
 	if err := os.MkdirAll(destDir, 0755); err != nil {
 		return nil, fmt.Errorf("create destination directory: %w", err)
 	}
 
+	var totalSize int64
+
 	// First pass: extract/decompress the collection database and parse the media map.
 	var mediaMap MediaMap
 	for _, file := range reader.File {
+		// Validate entry name for path traversal and null bytes
+		if err := validateZipEntryName(file.Name, destDir); err != nil {
+			return nil, fmt.Errorf("invalid entry %q: %w", file.Name, err)
+		}
+
 		switch file.Name {
 		case "collection.anki21b":
 			dbPath := filepath.Join(destDir, "collection.anki2")
-			if err := extractZstdZipFile(file, dbPath); err != nil {
+			written, err := extractZstdZipFileWithLimit(file, dbPath, maxFileSize)
+			totalSize += written
+			if totalSize > maxTotalSize {
+				return nil, fmt.Errorf("total decompressed size exceeds %d byte limit", maxTotalSize)
+			}
+			if err != nil {
 				return nil, fmt.Errorf("decompress collection: %w", err)
 			}
 		case "collection.anki2":
@@ -242,10 +305,15 @@ func ImportColpkg(colpkgPath string, destDir string) (*ImportResult, error) {
 			if err != nil {
 				return nil, fmt.Errorf("open media map: %w", err)
 			}
-			data, err := io.ReadAll(rc)
+			limited := io.LimitReader(rc, maxFileSize)
+			data, err := io.ReadAll(limited)
 			_ = rc.Close()
 			if err != nil {
 				return nil, fmt.Errorf("read media map: %w", err)
+			}
+			totalSize += int64(len(data))
+			if totalSize > maxTotalSize {
+				return nil, fmt.Errorf("total decompressed size exceeds %d byte limit", maxTotalSize)
 			}
 			_ = json.Unmarshal(data, &mediaMap)
 		}
@@ -266,11 +334,19 @@ func ImportColpkg(colpkgPath string, destDir string) (*ImportResult, error) {
 			if !ok {
 				continue
 			}
+			if err := validateMediaFilename(filename); err != nil {
+				return nil, fmt.Errorf("invalid media filename in archive: %w", err)
+			}
 			mediaPath := filepath.Join(mediaDir, filename)
 			if err := validatePathWithinDir(mediaPath, mediaDir); err != nil {
 				return nil, fmt.Errorf("media file path escapes destination: %s: %w", filename, err)
 			}
-			if err := extractZipFile(file, mediaPath); err != nil {
+			written, err := extractZipFileWithLimit(file, mediaPath, maxFileSize)
+			totalSize += written
+			if totalSize > maxTotalSize {
+				return nil, fmt.Errorf("total decompressed size exceeds %d byte limit", maxTotalSize)
+			}
+			if err != nil {
 				return nil, fmt.Errorf("extract media file %s: %w", filename, err)
 			}
 			result.MediaFilesImported++
@@ -287,6 +363,48 @@ func validatePathWithinDir(path, dir string) error {
 	cleanDir := filepath.Clean(dir)
 	if !strings.HasPrefix(cleanPath+string(os.PathSeparator), cleanDir+string(os.PathSeparator)) && cleanPath != cleanDir {
 		return fmt.Errorf("path escapes directory: %s", path)
+	}
+	return nil
+}
+
+// validateZipEntryName validates that a ZIP entry name does not contain null
+// bytes and resolves within the destination directory (path traversal check).
+func validateZipEntryName(entryName, destDir string) error {
+	// Reject null bytes
+	if strings.ContainsRune(entryName, 0) {
+		return fmt.Errorf("entry name contains null byte")
+	}
+
+	// Check for path traversal: resolve the path and verify it stays within destDir
+	fullPath := filepath.Join(destDir, entryName)
+	rel, err := filepath.Rel(destDir, fullPath)
+	if err != nil {
+		return fmt.Errorf("path resolution error: %w", err)
+	}
+	if strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		return fmt.Errorf("entry resolves outside destination directory")
+	}
+	return nil
+}
+
+// validateMediaFilename checks that a media filename is safe for extraction.
+// It must contain only alphanumeric characters, underscores, hyphens, and dots;
+// must not start with a dot (no hidden files); must not contain ".."; and must
+// not be empty.
+var validMediaFilenameRe = regexp.MustCompile(`^[a-zA-Z0-9_]([a-zA-Z0-9_.-]*[a-zA-Z0-9_.-])?$|^[a-zA-Z0-9_]$`)
+
+func validateMediaFilename(name string) error {
+	if name == "" {
+		return fmt.Errorf("invalid media filename: %q", name)
+	}
+	if strings.HasPrefix(name, ".") {
+		return fmt.Errorf("invalid media filename: %q", name)
+	}
+	if strings.Contains(name, "..") {
+		return fmt.Errorf("invalid media filename: %q", name)
+	}
+	if !validMediaFilenameRe.MatchString(name) {
+		return fmt.Errorf("invalid media filename: %q", name)
 	}
 	return nil
 }
@@ -310,6 +428,43 @@ func extractZipFile(file *zip.File, destPath string) error {
 	}
 
 	return nil
+}
+
+// extractZipFileWithLimit extracts a single file from a ZIP archive to disk,
+// enforcing a maximum decompressed size. Returns the number of bytes written.
+func extractZipFileWithLimit(file *zip.File, destPath string, maxSize int64) (int64, error) {
+	rc, err := file.Open()
+	if err != nil {
+		return 0, fmt.Errorf("open zip entry %s: %w", file.Name, err)
+	}
+	defer func() { _ = rc.Close() }()
+
+	// Check uncompressed size upfront if available
+	if file.UncompressedSize64 > uint64(maxSize) {
+		return 0, fmt.Errorf("file %q decompressed size %d exceeds %d byte limit", file.Name, file.UncompressedSize64, maxSize)
+	}
+
+	outFile, err := os.Create(destPath)
+	if err != nil {
+		return 0, fmt.Errorf("create file %s: %w", destPath, err)
+	}
+	defer func() { _ = outFile.Close() }()
+
+	limited := io.LimitReader(rc, maxSize+1) // +1 to detect overflow
+	var buf bytes.Buffer
+	written, err := io.Copy(&buf, limited)
+	if err != nil {
+		return 0, fmt.Errorf("read zip entry %s: %w", file.Name, err)
+	}
+	if written > maxSize {
+		return 0, fmt.Errorf("file %q decompressed size exceeds %d byte limit", file.Name, maxSize)
+	}
+
+	if _, err := outFile.Write(buf.Bytes()); err != nil {
+		return 0, fmt.Errorf("write file %s: %w", destPath, err)
+	}
+
+	return written, nil
 }
 
 // extractZstdZipFile extracts a Zstandard-compressed file from a ZIP archive
@@ -339,6 +494,50 @@ func extractZstdZipFile(file *zip.File, destPath string) error {
 	}
 
 	return nil
+}
+
+// extractZstdZipFileWithLimit extracts a Zstandard-compressed file from a ZIP archive,
+// enforcing size limits on both compressed and decompressed data. Returns decompressed size.
+// This streams through the zstd decompressor with an output limit, preventing zip bombs
+// where a small compressed payload expands to many gigabytes.
+func extractZstdZipFileWithLimit(file *zip.File, destPath string, maxSize int64) (int64, error) {
+	rc, err := file.Open()
+	if err != nil {
+		return 0, fmt.Errorf("open zip entry %s: %w", file.Name, err)
+	}
+	defer func() { _ = rc.Close() }()
+
+	// Read compressed data with limit
+	limitedCompressed := io.LimitReader(rc, maxSize+1) // +1 to detect oversized compressed data
+	compressed, err := io.ReadAll(limitedCompressed)
+	if err != nil {
+		return 0, fmt.Errorf("read zip entry %s: %w", file.Name, err)
+	}
+
+	// Stream decompression with an output size limit to prevent decompression bombs.
+	// A small compressed payload can expand to many gigabytes; this bounds the memory usage.
+	zstdReader, err := zstd.NewReader(bytes.NewReader(compressed))
+	if err != nil {
+		return 0, fmt.Errorf("create zstd reader for %s: %w", file.Name, err)
+	}
+	defer zstdReader.Close()
+
+	limitedDec := io.LimitReader(zstdReader, maxSize+1) // +1 to detect overflow
+	decompressed, err := io.ReadAll(limitedDec)
+	if err != nil {
+		return 0, fmt.Errorf("decompress %s: %w", file.Name, err)
+	}
+
+	if int64(len(decompressed)) > maxSize {
+		return 0, fmt.Errorf("file %q decompressed size %d exceeds %d byte limit", file.Name, len(decompressed), maxSize)
+	}
+
+	// Write decompressed data
+	if err := os.WriteFile(destPath, decompressed, 0644); err != nil {
+		return 0, fmt.Errorf("write file %s: %w", destPath, err)
+	}
+
+	return int64(len(decompressed)), nil
 }
 
 // addFileToZip adds a byte slice as a file to a ZIP writer.

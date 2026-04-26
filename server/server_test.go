@@ -1,6 +1,8 @@
 package server
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -577,5 +579,285 @@ func TestWithSyncConfig(t *testing.T) {
 	srv := NewServer("/tmp/test.anki2", WithSyncConfig(cfg))
 	if srv.syncConfig == nil || srv.syncConfig.Username != "test" {
 		t.Error("expected sync config to be set")
+	}
+}
+
+func TestAuthTokenHash(t *testing.T) {
+	srv := NewServer("/tmp/test.anki2", WithAuthToken("mysecret"))
+	if len(srv.authTokenHash) != 32 {
+		t.Errorf("expected 32-byte hash, got %d bytes", len(srv.authTokenHash))
+	}
+	// Verify the hash is SHA-256 of "mysecret"
+	expected := sha256.Sum256([]byte("mysecret"))
+	if !bytes.Equal(srv.authTokenHash, expected[:]) {
+		t.Error("auth token hash does not match expected SHA-256")
+	}
+}
+
+func TestAuthMiddlewareWithoutToken(t *testing.T) {
+	srv, _ := setupServer(t)
+	handler := srv.Handler()
+
+	// Without token configured, all endpoints should be accessible
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/version", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200 without auth, got %d", w.Code)
+	}
+}
+
+func TestAuthMiddlewareWithToken(t *testing.T) {
+	dbPath := createTestDB(t)
+	srv := NewServer(dbPath, WithScheduler(scheduler.NewFSRSScheduler()), WithAuthToken("testtoken"))
+	handler := srv.Handler()
+
+	tests := []struct {
+		name       string
+		path       string
+		method     string
+		token      string
+		wantStatus int
+	}{
+		{
+			name:       "health endpoint no auth needed",
+			path:       "/health",
+			method:     http.MethodGet,
+			token:      "",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "API endpoint no auth header",
+			path:       "/api/v1/version",
+			method:     http.MethodGet,
+			token:      "",
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "API endpoint wrong token",
+			path:       "/api/v1/version",
+			method:     http.MethodGet,
+			token:      "wrongtoken",
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "API endpoint correct token",
+			path:       "/api/v1/version",
+			method:     http.MethodGet,
+			token:      "testtoken",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "decks endpoint correct token",
+			path:       "/api/v1/decks",
+			method:     http.MethodGet,
+			token:      "testtoken",
+			wantStatus: http.StatusOK,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			if tt.token != "" {
+				req.Header.Set("Authorization", "Bearer "+tt.token)
+			}
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Errorf("expected status %d, got %d; body: %s", tt.wantStatus, w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestAuthMiddlewareUnauthorizedResponse(t *testing.T) {
+	dbPath := createTestDB(t)
+	srv := NewServer(dbPath, WithScheduler(scheduler.NewFSRSScheduler()), WithAuthToken("secret"))
+	handler := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/version", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status 401, got %d", w.Code)
+	}
+
+	var resp map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["error"] != "unauthorized" {
+		t.Errorf("expected error 'unauthorized', got %q", resp["error"])
+	}
+}
+
+func TestHealthEndpointNoAuth(t *testing.T) {
+	dbPath := createTestDB(t)
+	srv := NewServer(dbPath, WithScheduler(scheduler.NewFSRSScheduler()), WithAuthToken("secret"))
+	handler := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var resp map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["status"] != "ok" {
+		t.Errorf("expected status 'ok', got %q", resp["status"])
+	}
+}
+
+func TestRateLimitMiddleware(t *testing.T) {
+	srv, _ := setupServer(t)
+	srv.rateLimit = 3 // Low limit for testing
+	srv.limiter = &rateLimiter{
+		requests: make(map[string][]time.Time),
+		limit:    3,
+	}
+	handler := srv.Handler()
+
+	// First 3 requests should succeed
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/health", nil)
+		req.RemoteAddr = "1.2.3.4:12345"
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Errorf("request %d: expected status 200, got %d", i+1, w.Code)
+		}
+	}
+
+	// 4th request should be rate limited
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.RemoteAddr = "1.2.3.4:12345"
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusTooManyRequests {
+		t.Errorf("expected status 429, got %d", w.Code)
+	}
+
+	// Different IP should not be rate limited
+	req = httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.RemoteAddr = "5.6.7.8:12345"
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("different IP: expected status 200, got %d", w.Code)
+	}
+}
+
+func TestRateLimitDisabled(t *testing.T) {
+	srv, _ := setupServer(t)
+	srv.rateLimit = 0 // disabled
+	handler := srv.Handler()
+
+	// Should allow many requests without rate limiting
+	for i := 0; i < 100; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/health", nil)
+		req.RemoteAddr = "1.2.3.4:12345"
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Errorf("request %d: expected status 200, got %d", i, w.Code)
+			break
+		}
+	}
+}
+
+func TestRateLimitResponseFormat(t *testing.T) {
+	srv, _ := setupServer(t)
+	srv.rateLimit = 1
+	srv.limiter = &rateLimiter{
+		requests: make(map[string][]time.Time),
+		limit:    1,
+	}
+	handler := srv.Handler()
+
+	// Use up the quota
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.RemoteAddr = "1.2.3.4:12345"
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	// Next request should be 429 with JSON error
+	req = httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.RemoteAddr = "1.2.3.4:12345"
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected status 429, got %d", w.Code)
+	}
+
+	var resp map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["error"] != "rate limit exceeded" {
+		t.Errorf("expected error 'rate limit exceeded', got %q", resp["error"])
+	}
+}
+
+func TestRateLimiterAllow(t *testing.T) {
+	rl := &rateLimiter{
+		requests: make(map[string][]time.Time),
+		limit:    2,
+	}
+
+	// First request should be allowed
+	result := rl.allow("1.2.3.4")
+	if !result.allowed {
+		t.Error("first request should be allowed")
+	}
+
+	// Second request should be allowed
+	result = rl.allow("1.2.3.4")
+	if !result.allowed {
+		t.Error("second request should be allowed")
+	}
+
+	// Third request should be rate limited
+	result = rl.allow("1.2.3.4")
+	if result.allowed {
+		t.Error("third request should be rate limited")
+	}
+
+	// Different IP should be allowed
+	result = rl.allow("5.6.7.8")
+	if !result.allowed {
+		t.Error("different IP should be allowed")
+	}
+}
+
+func TestRateLimiterCleanup(t *testing.T) {
+	rl := &rateLimiter{
+		requests: make(map[string][]time.Time),
+		limit:    100,
+	}
+
+	// Add an old entry
+	rl.requests["1.2.3.4"] = []time.Time{time.Now().Add(-2 * time.Minute)}
+	rl.requests["5.6.7.8"] = []time.Time{time.Now()}
+
+	rl.cleanup()
+
+	// Old entry should be removed
+	if _, ok := rl.requests["1.2.3.4"]; ok {
+		t.Error("expired IP should be cleaned up")
+	}
+
+	// Recent entry should remain
+	if _, ok := rl.requests["5.6.7.8"]; !ok {
+		t.Error("recent IP should not be cleaned up")
 	}
 }

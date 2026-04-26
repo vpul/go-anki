@@ -103,7 +103,7 @@ type Stats struct {
 // SyncConfig holds AnkiWeb sync credentials.
 type SyncConfig struct {
 	Username string `json:"username"`
-	Password string `json:"password"`
+	Password string `json:"-"`
 }
 
 // SyncMeta holds metadata returned by AnkiWeb sync handshake.
