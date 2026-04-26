@@ -4,6 +4,8 @@
 package server
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -66,16 +68,28 @@ func WithServerTimeouts(read, write, idle time.Duration) ServerOption {
 	}
 }
 
+// WithAuthToken sets the bearer token for authenticating requests.
+// When configured, all endpoints except GET /health require a valid
+// Authorization: Bearer <token> header. The token is stored as a SHA-256 hash.
+func WithAuthToken(token string) ServerOption {
+	return func(s *Server) {
+		hash := sha256.Sum256([]byte(token))
+		s.authTokenHash = hash[:]
+	}
+}
+
 // Server is an HTTP API server wrapping go-anki collection operations.
 type Server struct {
-	dbPath      string
-	mediaDir    string
-	syncConfig  *goanki.SyncConfig
-	port        int
-	scheduler   collection.Scheduler
-	readTimeout time.Duration
+	dbPath       string
+	mediaDir     string
+	syncConfig   *goanki.SyncConfig
+	port         int
+	scheduler    collection.Scheduler
+	readTimeout  time.Duration
 	writeTimeout time.Duration
-	idleTimeout time.Duration
+	idleTimeout  time.Duration
+	authTokenHash []byte
+	closeCh      chan struct{}
 }
 
 // NewServer creates a new Server with the given database path and options.
@@ -87,6 +101,7 @@ func NewServer(dbPath string, opts ...ServerOption) *Server {
 		readTimeout:  5 * time.Second,
 		writeTimeout: 10 * time.Second,
 		idleTimeout:  60 * time.Second,
+		closeCh:      make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -167,9 +182,48 @@ func maxBodySize(next http.Handler) http.Handler {
 	})
 }
 
+// requireAuth is middleware that checks the Authorization: Bearer <token> header
+// against the hashed auth token. If no token is configured, auth is not required.
+func (s *Server) requireAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(s.authTokenHash) == 0 {
+			// No auth configured — allow everything
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Health endpoint is always accessible
+		if r.Method == http.MethodGet && r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		authHeader := r.Header.Get("Authorization")
+		if !strings.HasPrefix(authHeader, "Bearer ") {
+			errorResponse(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		token := strings.TrimPrefix(authHeader, "Bearer ")
+		tokenHash := sha256.Sum256([]byte(token))
+		if subtle.ConstantTimeCompare(tokenHash[:], s.authTokenHash) != 1 {
+			errorResponse(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// handleHealth returns the server health status.
+func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	jsonResponse(w, map[string]string{"status": "ok"})
+}
+
 // Handler returns an http.Handler with all API routes registered.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+
+	// Health check endpoint (no auth required)
+	mux.HandleFunc("GET /health", s.handleHealth)
 
 	// Read endpoints
 	mux.HandleFunc("GET /api/v1/version", s.handleVersion)
@@ -187,7 +241,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/sync/download", s.handleSyncDownload)
 	mux.HandleFunc("POST /api/v1/sync/upload", s.handleSyncUpload)
 
-	return maxBodySize(mux)
+	return s.requireAuth(maxBodySize(mux))
 }
 
 // ListenAndServe starts the HTTP server on the configured port.

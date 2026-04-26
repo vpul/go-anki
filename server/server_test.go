@@ -1,6 +1,8 @@
 package server
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -577,5 +579,140 @@ func TestWithSyncConfig(t *testing.T) {
 	srv := NewServer("/tmp/test.anki2", WithSyncConfig(cfg))
 	if srv.syncConfig == nil || srv.syncConfig.Username != "test" {
 		t.Error("expected sync config to be set")
+	}
+}
+
+func TestAuthTokenHash(t *testing.T) {
+	srv := NewServer("/tmp/test.anki2", WithAuthToken("mysecret"))
+	if len(srv.authTokenHash) != 32 {
+		t.Errorf("expected 32-byte hash, got %d bytes", len(srv.authTokenHash))
+	}
+	// Verify the hash is SHA-256 of "mysecret"
+	expected := sha256.Sum256([]byte("mysecret"))
+	if !bytes.Equal(srv.authTokenHash, expected[:]) {
+		t.Error("auth token hash does not match expected SHA-256")
+	}
+}
+
+func TestAuthMiddlewareWithoutToken(t *testing.T) {
+	srv, _ := setupServer(t)
+	handler := srv.Handler()
+
+	// Without token configured, all endpoints should be accessible
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/version", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200 without auth, got %d", w.Code)
+	}
+}
+
+func TestAuthMiddlewareWithToken(t *testing.T) {
+	dbPath := createTestDB(t)
+	srv := NewServer(dbPath, WithScheduler(scheduler.NewFSRSScheduler()), WithAuthToken("testtoken"))
+	handler := srv.Handler()
+
+	tests := []struct {
+		name       string
+		path       string
+		method     string
+		token      string
+		wantStatus int
+	}{
+		{
+			name:       "health endpoint no auth needed",
+			path:       "/health",
+			method:     http.MethodGet,
+			token:      "",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "API endpoint no auth header",
+			path:       "/api/v1/version",
+			method:     http.MethodGet,
+			token:      "",
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "API endpoint wrong token",
+			path:       "/api/v1/version",
+			method:     http.MethodGet,
+			token:      "wrongtoken",
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "API endpoint correct token",
+			path:       "/api/v1/version",
+			method:     http.MethodGet,
+			token:      "testtoken",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "decks endpoint correct token",
+			path:       "/api/v1/decks",
+			method:     http.MethodGet,
+			token:      "testtoken",
+			wantStatus: http.StatusOK,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			if tt.token != "" {
+				req.Header.Set("Authorization", "Bearer "+tt.token)
+			}
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Errorf("expected status %d, got %d; body: %s", tt.wantStatus, w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestAuthMiddlewareUnauthorizedResponse(t *testing.T) {
+	dbPath := createTestDB(t)
+	srv := NewServer(dbPath, WithScheduler(scheduler.NewFSRSScheduler()), WithAuthToken("secret"))
+	handler := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/version", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status 401, got %d", w.Code)
+	}
+
+	var resp map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["error"] != "unauthorized" {
+		t.Errorf("expected error 'unauthorized', got %q", resp["error"])
+	}
+}
+
+func TestHealthEndpointNoAuth(t *testing.T) {
+	dbPath := createTestDB(t)
+	srv := NewServer(dbPath, WithScheduler(scheduler.NewFSRSScheduler()), WithAuthToken("secret"))
+	handler := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var resp map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["status"] != "ok" {
+		t.Errorf("expected status 'ok', got %q", resp["status"])
 	}
 }
