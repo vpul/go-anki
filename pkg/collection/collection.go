@@ -49,14 +49,14 @@ func Open(path string, mode OpenMode) (*Collection, error) {
 	var ver int
 	err = db.QueryRow("SELECT ver FROM col").Scan(&ver)
 	if err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("not a valid Anki collection: %w", err)
 	}
 
 	// Enable WAL mode for writes (Anki's expected journal mode)
 	if mode == ReadWrite {
 		if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-			db.Close()
+			_ = db.Close()
 			return nil, fmt.Errorf("set WAL mode: %w", err)
 		}
 	}
@@ -174,7 +174,7 @@ func (c *Collection) GetDueCards(filter goanki.DueCardsFilter) ([]goanki.Card, e
 	if err != nil {
 		return nil, fmt.Errorf("query due cards: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	// Preload decks and models for enrichment
 	decks, _ := c.GetDecks()
