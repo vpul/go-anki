@@ -117,9 +117,9 @@ func TestIsNumeric(t *testing.T) {
 func TestDiscoverMediaFiles(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	os.WriteFile(filepath.Join(tmpDir, "image.png"), []byte("png"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "audio.mp3"), []byte("mp3"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, ".hidden"), []byte("hidden"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "image.png"), []byte("png"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "audio.mp3"), []byte("mp3"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, ".hidden"), []byte("hidden"), 0644)
 
 	mediaMap, err := discoverMediaFiles(tmpDir)
 	if err != nil {

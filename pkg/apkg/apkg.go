@@ -107,10 +107,10 @@ func ExportApkg(opts ExportOptions) error {
 	if err != nil {
 		return fmt.Errorf("create output file: %w", err)
 	}
-	defer outFile.Close()
+	defer func() { _ = outFile.Close() }()
 
 	zipWriter := zip.NewWriter(outFile)
-	defer zipWriter.Close()
+	defer func() { _ = zipWriter.Close() }()
 
 	// Add collection.anki2
 	if err := addFileToZip(zipWriter, "collection.anki2", dbData); err != nil {
@@ -159,7 +159,7 @@ func ImportApkg(apkgPath string, destDir string) (*ImportResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open apkg file: %w", err)
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	// Ensure destination directory exists
 	if err := os.MkdirAll(destDir, 0755); err != nil {
@@ -186,7 +186,7 @@ func ImportApkg(apkgPath string, destDir string) (*ImportResult, error) {
 				return nil, fmt.Errorf("open media map: %w", err)
 			}
 			data, err := io.ReadAll(rc)
-			rc.Close()
+			_ = rc.Close()
 			if err != nil {
 				return nil, fmt.Errorf("read media map: %w", err)
 			}
@@ -230,7 +230,7 @@ func ImportColpkg(colpkgPath string, destDir string) (*ImportResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open colpkg file: %w", err)
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	if err := os.MkdirAll(destDir, 0755); err != nil {
 		return nil, fmt.Errorf("create destination directory: %w", err)
@@ -263,7 +263,7 @@ func ImportColpkg(colpkgPath string, destDir string) (*ImportResult, error) {
 				return nil, fmt.Errorf("open media map: %w", err)
 			}
 			data, err := io.ReadAll(rc)
-			rc.Close()
+			_ = rc.Close()
 			if err != nil {
 				return nil, fmt.Errorf("read media map: %w", err)
 			}
@@ -300,13 +300,13 @@ func extractZipFile(file *zip.File, destPath string) error {
 	if err != nil {
 		return fmt.Errorf("open zip entry %s: %w", file.Name, err)
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	outFile, err := os.Create(destPath)
 	if err != nil {
 		return fmt.Errorf("create file %s: %w", destPath, err)
 	}
-	defer outFile.Close()
+	defer func() { _ = outFile.Close() }()
 
 	if _, err := io.Copy(outFile, rc); err != nil {
 		return fmt.Errorf("write file %s: %w", destPath, err)
@@ -322,7 +322,7 @@ func extractZstdZipFile(file *zip.File, destPath string) error {
 	if err != nil {
 		return fmt.Errorf("open zip entry %s: %w", file.Name, err)
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	// Read compressed data
 	compressed, err := io.ReadAll(rc)
