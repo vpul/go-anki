@@ -386,7 +386,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/sync/download", s.handleSyncDownload)
 	mux.HandleFunc("POST /api/v1/sync/upload", s.handleSyncUpload)
 
-	return s.rateLimitMiddleware(s.requireAuth(recoverPanic(maxBodySize(mux))))
+	return recoverPanic(s.rateLimitMiddleware(s.requireAuth(maxBodySize(mux))))
 }
 
 // ListenAndServe starts the HTTP server on the configured port.
