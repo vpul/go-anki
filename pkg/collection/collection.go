@@ -249,6 +249,10 @@ func (c *Collection) GetDueCards(filter goanki.DueCardsFilter) ([]goanki.Card, e
 		cards = append(cards, card)
 	}
 
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate due cards: %w", err)
+	}
+
 	return cards, nil
 }
 

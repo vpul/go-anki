@@ -182,7 +182,7 @@ func (c *Client) Authenticate(ctx context.Context) error {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 		return fmt.Errorf("auth failed (status %d): %s", resp.StatusCode, string(body))
 	}
 
@@ -239,7 +239,7 @@ func (c *Client) Meta(ctx context.Context) (*goankitypes.SyncMeta, error) {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 		return nil, fmt.Errorf("meta request failed (status %d): %s", resp.StatusCode, string(respBody))
 	}
 
@@ -303,7 +303,7 @@ func (c *Client) FullDownload(ctx context.Context, dbPath string, mediaDir strin
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 		return nil, fmt.Errorf("download failed (status %d): %s", resp.StatusCode, string(respBody))
 	}
 
@@ -608,7 +608,7 @@ func (c *Client) FullUpload(ctx context.Context, dbPath string, mediaDir string)
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 		return fmt.Errorf("upload failed (status %d): %s", resp.StatusCode, string(respBody))
 	}
 
