@@ -358,7 +358,7 @@ func (c *Collection) AddNote(input goanki.NewNote) (int64, error) {
 
 	// Create cards for each template
 	for _, tmpl := range model.Templates {
-		cardID := noteID + int64(tmpl.ORD) + int64(randInt(100))
+		cardID := noteID + int64(tmpl.ORD)*1000 + int64(randInt(1000))
 		_, err = tx.Exec(`
 			INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl,
 			                    factor, reps, lapses, left, odue, odid, flags, data)

@@ -431,6 +431,7 @@ func runServe() error {
 	db := fs.String("db", "collection.anki2", "path to collection database")
 	media := fs.String("media", "collection.media", "media directory path")
 	port := fs.Int("port", 8765, "HTTP server port")
+	authToken := fs.String("auth-token", envOr("ANKIGO_AUTH_TOKEN", ""), "bearer token for HTTP authentication (or set $ANKIGO_AUTH_TOKEN)")
 	username := fs.String("username", envOr("ANKIWEB_USERNAME", ""), "AnkiWeb username (optional, enables sync endpoints)")
 	password := envOr("ANKIWEB_PASSWORD", "")
 	if err := fs.Parse(reorderFlags(os.Args[2:], boolFlagsFor(fs))); err != nil {
@@ -445,6 +446,10 @@ func runServe() error {
 		server.WithPort(*port),
 		server.WithMediaDir(*media),
 		server.WithScheduler(scheduler.NewFSRSScheduler()),
+	}
+
+	if *authToken != "" {
+		opts = append(opts, server.WithAuthToken(*authToken))
 	}
 
 	if *username != "" && password != "" {
