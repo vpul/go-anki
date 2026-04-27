@@ -332,6 +332,32 @@ func TestUpdateCard(t *testing.T) {
 	}
 }
 
+func TestGetDueCardsQuestionAnswer(t *testing.T) {
+	col, _ := createTestDB(t)
+	defer func() { _ = col.Close() }()
+
+	cards, err := col.GetDueCards(goanki.DueCardsFilter{})
+	if err != nil {
+		t.Fatalf("GetDueCards: %v", err)
+	}
+	if len(cards) == 0 {
+		t.Fatal("expected at least one due card")
+	}
+	if cards[0].Question == "" {
+		t.Error("expected non-empty question on due card")
+	}
+}
+
+func TestAnswerCardNotFound(t *testing.T) {
+	col, _ := createReadWriteTestDB(t)
+	defer func() { _ = col.Close() }()
+
+	_, err := col.AnswerCard(999999999999, goanki.RatingGood, nil)
+	if err == nil {
+		t.Fatal("expected error when answering non-existent card")
+	}
+}
+
 func TestInsertReviewLog(t *testing.T) {
 	col, _ := createReadWriteTestDB(t)
 	defer func() { _ = col.Close() }()

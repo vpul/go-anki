@@ -201,6 +201,13 @@ func NewServer(dbPath string, opts ...ServerOption) *Server {
 	for _, opt := range opts {
 		opt(s)
 	}
+	if s.rateLimit > 0 {
+		s.limiter = &rateLimiter{
+			requests: make(map[string][]time.Time),
+			limit:    s.rateLimit,
+			maxIPs:   maxTrackedIPs,
+		}
+	}
 	return s
 }
 
@@ -280,6 +287,15 @@ func maxBodySize(next http.Handler) http.Handler {
 	})
 }
 
+// securityHeaders adds defensive HTTP headers to all responses.
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		next.ServeHTTP(w, r)
+	})
+}
+
 // recoverPanic is middleware that recovers from panics in HTTP handlers,
 // returning a 500 Internal Server Error instead of dropping the connection.
 func recoverPanic(next http.Handler) http.Handler {
@@ -329,18 +345,8 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 
 // rateLimitMiddleware applies per-IP rate limiting.
 func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
-	// If rate limiting is disabled, pass through
-	if s.rateLimit <= 0 {
+	if s.rateLimit <= 0 || s.limiter == nil {
 		return next
-	}
-
-	// Create the rate limiter if not yet initialized
-	if s.limiter == nil {
-		s.limiter = &rateLimiter{
-			requests: make(map[string][]time.Time),
-			limit:    s.rateLimit,
-			maxIPs:   maxTrackedIPs,
-		}
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -386,7 +392,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/sync/download", s.handleSyncDownload)
 	mux.HandleFunc("POST /api/v1/sync/upload", s.handleSyncUpload)
 
-	return recoverPanic(s.rateLimitMiddleware(s.requireAuth(maxBodySize(mux))))
+	return recoverPanic(securityHeaders(s.rateLimitMiddleware(s.requireAuth(maxBodySize(mux)))))
 }
 
 // ListenAndServe starts the HTTP server on the configured port.
@@ -403,15 +409,7 @@ func (s *Server) ListenAndServe() error {
 	log.Printf("go-anki server listening on %s", addr)
 
 	// Start rate limiter cleanup goroutine if rate limiting is enabled
-	if s.rateLimit > 0 {
-		// Ensure limiter is initialized
-		if s.limiter == nil {
-			s.limiter = &rateLimiter{
-				requests: make(map[string][]time.Time),
-				limit:    s.rateLimit,
-				maxIPs:   maxTrackedIPs,
-			}
-		}
+	if s.limiter != nil {
 		go func() {
 			ticker := time.NewTicker(5 * time.Minute)
 			defer ticker.Stop()
@@ -477,15 +475,15 @@ func (s *Server) handleGetDueCards(col *collection.Collection, w http.ResponseWr
 		filter.DeckName = deck
 	}
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-		if n, err := strconv.Atoi(limitStr); err == nil {
+		if n, err := strconv.Atoi(limitStr); err == nil && n > 0 {
 			filter.Limit = n
 		}
 	}
 	if filter.Limit <= 0 {
 		filter.Limit = 100
 	}
-	if filter.Limit > 1000 {
-		filter.Limit = 1000
+	if filter.Limit > goanki.MaxCardsPerQuery {
+		filter.Limit = goanki.MaxCardsPerQuery
 	}
 
 	cards, err := col.GetDueCards(filter)
@@ -645,7 +643,7 @@ func (s *Server) handleSyncDownload(w http.ResponseWriter, r *http.Request) {
 	defer s.syncMu.Unlock()
 
 	if s.syncConfig == nil {
-		errorResponse(w, http.StatusBadRequest, "sync not configured: set SyncConfig")
+		errorResponse(w, http.StatusServiceUnavailable, "sync not configured: set SyncConfig")
 		return
 	}
 
@@ -695,7 +693,7 @@ func (s *Server) handleSyncUpload(w http.ResponseWriter, r *http.Request) {
 	defer s.syncMu.Unlock()
 
 	if s.syncConfig == nil {
-		errorResponse(w, http.StatusBadRequest, "sync not configured: set SyncConfig")
+		errorResponse(w, http.StatusServiceUnavailable, "sync not configured: set SyncConfig")
 		return
 	}
 

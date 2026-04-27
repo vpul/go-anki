@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,6 +15,8 @@ import (
 
 	goanki "github.com/vpul/go-anki/pkg/types"
 )
+
+const secondsPerDay int64 = 86400
 
 // ErrNotFound is returned when a requested resource does not exist.
 var ErrNotFound = errors.New("not found")
@@ -178,9 +181,9 @@ func (c *Collection) GetDueCards(filter goanki.DueCardsFilter) ([]goanki.Card, e
 	// Calculate days since collection creation
 	var dayCutoff int64
 	if crt > 0 {
-		dayCutoff = (time.Now().Unix() - crt) / 86400
+		dayCutoff = (time.Now().Unix() - crt) / secondsPerDay
 	} else {
-		dayCutoff = time.Now().Unix() / 86400
+		dayCutoff = time.Now().Unix() / secondsPerDay
 	}
 
 	query := `
@@ -226,6 +229,7 @@ func (c *Collection) GetDueCards(filter goanki.DueCardsFilter) ([]goanki.Card, e
 	}
 
 	var cards []goanki.Card
+	var nids []int64
 	for rows.Next() {
 		var card goanki.Card
 		err := rows.Scan(
@@ -243,21 +247,31 @@ func (c *Collection) GetDueCards(filter goanki.DueCardsFilter) ([]goanki.Card, e
 			card.DeckName = d.Name
 		}
 
-		// Enrich with question/answer content
-		note, err := c.getNoteByID(card.NID)
-		if err == nil && note != nil {
-			if m, ok := models[note.MID]; ok && card.ORD < len(m.Templates) {
-				card.Question, card.Answer = goanki.RenderCard(
-					note.FieldsAsMap(&m), &m.Templates[card.ORD],
-				)
-			}
-		}
-
 		cards = append(cards, card)
+		nids = append(nids, card.NID)
 	}
 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate due cards: %w", err)
+	}
+
+	// Batch-load notes for all cards in one query (avoids N+1)
+	notes, err := c.getNotesByIDs(nids)
+	if err != nil {
+		log.Printf("warning: failed to batch-load notes for enrichment: %v", err)
+		notes = map[int64]*goanki.Note{}
+	}
+
+	for i := range cards {
+		note, ok := notes[cards[i].NID]
+		if !ok || note == nil {
+			continue
+		}
+		if m, ok := models[note.MID]; ok && cards[i].ORD < len(m.Templates) {
+			cards[i].Question, cards[i].Answer = goanki.RenderCard(
+				note.FieldsAsMap(&m), &m.Templates[cards[i].ORD],
+			)
+		}
 	}
 
 	return cards, nil
@@ -331,9 +345,9 @@ func (c *Collection) GetStats() (*goanki.Stats, error) {
 	}
 	var dayCutoff int64
 	if crt > 0 {
-		dayCutoff = (time.Now().Unix() - crt) / 86400
+		dayCutoff = (time.Now().Unix() - crt) / secondsPerDay
 	} else {
-		dayCutoff = time.Now().Unix() / 86400
+		dayCutoff = time.Now().Unix() / secondsPerDay
 	}
 
 	if err := c.db.QueryRow("SELECT COUNT(*) FROM cards WHERE queue = 0").Scan(&stats.NewCards); err != nil {
@@ -365,6 +379,23 @@ func (c *Collection) GetStats() (*goanki.Stats, error) {
 	return stats, nil
 }
 
+// ifaceToStr converts a scanned SQLite value to a string.
+// In v18+ schema, sfld and csum columns may be INTEGER or TEXT depending on Anki's behavior.
+func ifaceToStr(v interface{}) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case int64:
+		return fmt.Sprintf("%d", t)
+	case float64:
+		return fmt.Sprintf("%v", t)
+	case nil:
+		return ""
+	default:
+		return fmt.Sprintf("%v", t)
+	}
+}
+
 // getNoteByID returns a note by its ID.
 // This avoids the COLLATE unicase issue by doing a simple ID lookup.
 func (c *Collection) getNoteByID(id int64) (*goanki.Note, error) {
@@ -373,9 +404,7 @@ func (c *Collection) getNoteByID(id int64) (*goanki.Note, error) {
 	if c.isV18Plus() {
 		// In v18+, sfld and csum are INTEGER columns, but the actual values may be
 		// stored as either integers or strings depending on Anki's behavior.
-		// We scan them into interface{} and format accordingly.
-		var sfld interface{}
-		var csum interface{}
+		var sfld, csum interface{}
 		err := c.db.QueryRow(`
 			SELECT id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data
 			FROM notes WHERE id = ?`, id).Scan(
@@ -385,31 +414,8 @@ func (c *Collection) getNoteByID(id int64) (*goanki.Note, error) {
 		if err != nil {
 			return nil, err
 		}
-		// Convert sfld and csum to strings regardless of stored type
-		switch v := sfld.(type) {
-		case string:
-			note.Sfld = v
-		case int64:
-			note.Sfld = fmt.Sprintf("%d", v)
-		case float64:
-			note.Sfld = fmt.Sprintf("%v", v)
-		case nil:
-			note.Sfld = ""
-		default:
-			note.Sfld = fmt.Sprintf("%v", v)
-		}
-		switch v := csum.(type) {
-		case string:
-			note.Csum = v
-		case int64:
-			note.Csum = fmt.Sprintf("%d", v)
-		case float64:
-			note.Csum = fmt.Sprintf("%v", v)
-		case nil:
-			note.Csum = ""
-		default:
-			note.Csum = fmt.Sprintf("%v", v)
-		}
+		note.Sfld = ifaceToStr(sfld)
+		note.Csum = ifaceToStr(csum)
 	} else {
 		err := c.db.QueryRow(`
 			SELECT id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data
@@ -422,4 +428,57 @@ func (c *Collection) getNoteByID(id int64) (*goanki.Note, error) {
 		}
 	}
 	return &note, nil
+}
+
+// getNotesByIDs returns notes for a batch of IDs in a single query.
+// Callers use the returned map to enrich cards without N+1 queries.
+func (c *Collection) getNotesByIDs(ids []int64) (map[int64]*goanki.Note, error) {
+	if len(ids) == 0 {
+		return map[int64]*goanki.Note{}, nil
+	}
+
+	// Deduplicate IDs to keep the IN clause minimal
+	seen := make(map[int64]struct{}, len(ids))
+	unique := make([]interface{}, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; !ok {
+			seen[id] = struct{}{}
+			unique = append(unique, id)
+		}
+	}
+
+	placeholders := strings.Repeat(",?", len(unique))[1:]
+	query := `SELECT id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data
+		FROM notes WHERE id IN (` + placeholders + `)`
+
+	rows, err := c.db.Query(query, unique...)
+	if err != nil {
+		return nil, fmt.Errorf("query notes by IDs: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	notes := make(map[int64]*goanki.Note, len(unique))
+	v18 := c.isV18Plus()
+	for rows.Next() {
+		note := &goanki.Note{}
+		if v18 {
+			var sfld, csum interface{}
+			if err := rows.Scan(&note.ID, &note.GUID, &note.MID, &note.Mod, &note.USN,
+				&note.Tags, &note.Flds, &sfld, &csum, &note.Flags, &note.Data); err != nil {
+				return nil, fmt.Errorf("scan note: %w", err)
+			}
+			note.Sfld = ifaceToStr(sfld)
+			note.Csum = ifaceToStr(csum)
+		} else {
+			if err := rows.Scan(&note.ID, &note.GUID, &note.MID, &note.Mod, &note.USN,
+				&note.Tags, &note.Flds, &note.Sfld, &note.Csum, &note.Flags, &note.Data); err != nil {
+				return nil, fmt.Errorf("scan note: %w", err)
+			}
+		}
+		notes[note.ID] = note
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate notes: %w", err)
+	}
+	return notes, nil
 }
