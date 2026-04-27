@@ -9,6 +9,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/vpul/go-anki/pkg/scheduler"
 	goanki "github.com/vpul/go-anki/pkg/types"
 )
 
@@ -352,7 +353,7 @@ func TestAnswerCardNotFound(t *testing.T) {
 	col, _ := createReadWriteTestDB(t)
 	defer func() { _ = col.Close() }()
 
-	_, err := col.AnswerCard(999999999999, goanki.RatingGood, nil)
+	_, err := col.AnswerCard(999999999999, goanki.RatingGood, scheduler.NewFSRSScheduler())
 	if err == nil {
 		t.Fatal("expected error when answering non-existent card")
 	}

@@ -255,7 +255,10 @@ func (c *Collection) GetDueCards(filter goanki.DueCardsFilter) ([]goanki.Card, e
 		return nil, fmt.Errorf("iterate due cards: %w", err)
 	}
 
-	// Batch-load notes for all cards in one query (avoids N+1)
+	// Batch-load notes for all cards in one query (avoids N+1).
+	// On failure we degrade gracefully: cards are returned without question/answer
+	// enrichment rather than failing the whole call. Callers that need enrichment
+	// can detect empty Question fields if necessary.
 	notes, err := c.getNotesByIDs(nids)
 	if err != nil {
 		log.Printf("warning: failed to batch-load notes for enrichment: %v", err)
