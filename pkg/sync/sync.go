@@ -104,12 +104,16 @@ func NewClient(config goankitypes.SyncConfig) (*Client, error) {
 	if err := validateURL(DefaultSyncURL); err != nil {
 		return nil, fmt.Errorf("validate default sync URL: %w", err)
 	}
+	transport := &http.Transport{
+		DialContext: ssrfSafeDialContext,
+	}
 	return &Client{
 		config:   config,
 		password: config.Password,
 		baseURL:  DefaultSyncURL,
 		httpClient: &http.Client{
-			Timeout: 5 * time.Minute, // Large downloads may take time
+			Timeout:   5 * time.Minute, // Large downloads may take time
+			Transport: transport,
 		},
 	}, nil
 }
@@ -120,12 +124,16 @@ func NewClientWithURL(config goankitypes.SyncConfig, baseURL string) (*Client, e
 	if err := validateURL(baseURL); err != nil {
 		return nil, fmt.Errorf("validate sync URL: %w", err)
 	}
+	transport := &http.Transport{
+		DialContext: ssrfSafeDialContext,
+	}
 	return &Client{
 		config:   config,
 		password: config.Password,
 		baseURL:  baseURL,
 		httpClient: &http.Client{
-			Timeout: 5 * time.Minute,
+			Timeout:   5 * time.Minute,
+			Transport: transport,
 		},
 	}, nil
 }
@@ -383,6 +391,44 @@ func (c *Client) FullDownload(ctx context.Context, dbPath string, mediaDir strin
 	}, nil
 }
 
+// ssrfSafeDialContext is a custom DialContext that resolves the hostname and
+// validates the IP against private ranges at connection time, preventing DNS
+// rebinding attacks where the IP changes between validation and connection.
+func ssrfSafeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid address %q: %w", addr, err)
+	}
+
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %q: %w", host, err)
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("no IP addresses found for %q", host)
+	}
+
+	for _, ipAddr := range ips {
+		ip := ipAddr.IP
+		if v4 := ip.To4(); v4 != nil {
+			ip = v4
+		}
+		if isPrivateIP(ip) {
+			if !ip.IsLoopback() {
+				return nil, fmt.Errorf("hostname %q resolves to private/reserved IP %s", host, ip)
+			}
+			// Allow loopback only for localhost/127.0.0.1/::1
+			if host != "localhost" && host != "127.0.0.1" && host != "::1" {
+				return nil, fmt.Errorf("hostname %q resolves to loopback IP %s", host, ip)
+			}
+		}
+	}
+
+	// Connect directly using the first resolved IP to prevent rebinding
+	dialer := &net.Dialer{Timeout: 30 * time.Second}
+	return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
+}
+
 // validateURL checks that a URL is safe to connect to, preventing SSRF attacks.
 // It requires HTTPS scheme (or HTTP only for localhost/loopback), and blocks
 // connections to private/reserved IP ranges.
@@ -597,6 +643,7 @@ func (c *Client) FullUpload(ctx context.Context, dbPath string, mediaDir string)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, syncURL, pr)
 	if err != nil {
+		pw.CloseWithError(fmt.Errorf("create upload request: %w", err))
 		return fmt.Errorf("create upload request: %w", err)
 	}
 	req.Header.Set("Content-Type", formWriter.FormDataContentType())

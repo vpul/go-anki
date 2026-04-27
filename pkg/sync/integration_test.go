@@ -30,10 +30,13 @@ func getCredentials(t *testing.T) (string, string) {
 func TestIntegrationAuthenticate(t *testing.T) {
 	username, password := getCredentials(t)
 
-	client := NewClient(goankitypes.SyncConfig{
+	client, err := NewClient(goankitypes.SyncConfig{
 		Username: username,
 		Password: password,
 	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
 
 	ctx := context.Background()
 	if err := client.Authenticate(ctx); err != nil {
@@ -46,10 +49,13 @@ func TestIntegrationAuthenticate(t *testing.T) {
 }
 
 func TestIntegrationAuthenticateBadCredentials(t *testing.T) {
-	client := NewClient(goankitypes.SyncConfig{
+	client, err := NewClient(goankitypes.SyncConfig{
 		Username: "definitely-not-a-real-user@example.com",
 		Password: "wrong-password-12345",
 	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
 
 	ctx := context.Background()
 	err := client.Authenticate(ctx)
@@ -62,10 +68,13 @@ func TestIntegrationAuthenticateBadCredentials(t *testing.T) {
 func TestIntegrationMeta(t *testing.T) {
 	username, password := getCredentials(t)
 
-	client := NewClient(goankitypes.SyncConfig{
+	client, err := NewClient(goankitypes.SyncConfig{
 		Username: username,
 		Password: password,
 	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
 
 	ctx := context.Background()
 	if err := client.Authenticate(ctx); err != nil {
@@ -87,10 +96,13 @@ func TestIntegrationMeta(t *testing.T) {
 func TestIntegrationFullDownload(t *testing.T) {
 	username, password := getCredentials(t)
 
-	client := NewClient(goankitypes.SyncConfig{
+	client, err := NewClient(goankitypes.SyncConfig{
 		Username: username,
 		Password: password,
 	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
 
 	ctx := context.Background()
 	if err := client.Authenticate(ctx); err != nil {
@@ -121,12 +133,15 @@ func TestIntegrationFullDownload(t *testing.T) {
 }
 
 func TestIntegrationMetaWithoutAuth(t *testing.T) {
-	client := NewClient(goankitypes.SyncConfig{
+	client, err := NewClient(goankitypes.SyncConfig{
 		Username: "test@example.com",
 		Password: "test",
 	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
 
-	_, err := client.Meta(context.Background())
+	_, err = client.Meta(context.Background())
 	if err == nil {
 		t.Fatal("expected error when calling Meta without authentication")
 	}

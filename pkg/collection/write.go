@@ -402,7 +402,9 @@ func generateGUID() string {
 	result := make([]byte, 10)
 	for i := 0; i < len(result); {
 		b := make([]byte, 1)
-		_, _ = rand.Read(b)
+		if _, err := rand.Read(b); err != nil {
+			panic(fmt.Sprintf("crypto/rand.Read failed: %v", err))
+		}
 		if b[0] < maxByte {
 			result[i] = chars[b[0]%byte(len(chars))]
 			i++
@@ -434,7 +436,9 @@ func randInt(max int) int {
 	threshold -= threshold % uint32(max)
 	b := make([]byte, 4)
 	for {
-		_, _ = rand.Read(b)
+		if _, err := rand.Read(b); err != nil {
+			panic(fmt.Sprintf("crypto/rand.Read failed: %v", err))
+		}
 		v := binary.BigEndian.Uint32(b)
 		if v < threshold {
 			return int(v % uint32(max))

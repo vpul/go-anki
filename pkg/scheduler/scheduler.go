@@ -255,7 +255,9 @@ func randIntn(n int) int {
 	threshold -= threshold % uint32(n)
 	b := make([]byte, 4)
 	for {
-		_, _ = rand.Read(b)
+		if _, err := rand.Read(b); err != nil {
+			panic(fmt.Sprintf("crypto/rand.Read failed: %v", err))
+		}
 		v := binary.BigEndian.Uint32(b)
 		if v < threshold {
 			return int(v % uint32(n))
