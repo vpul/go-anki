@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -43,10 +44,26 @@ func ExportColpkg(opts ExportColpkgOptions) error {
 		return fmt.Errorf("media map provided without media directory; set MediaDir to include media files")
 	}
 
-	// Read the source database
-	dbData, err := os.ReadFile(opts.SourceDB)
+	// Read the source database with size limit.
+	// Open once and stat the fd to avoid a TOCTOU race between size check and read.
+	dbF, err := os.Open(opts.SourceDB)
+	if err != nil {
+		return fmt.Errorf("open source database: %w", err)
+	}
+	defer func() { _ = dbF.Close() }()
+	dbInfo, err := dbF.Stat()
+	if err != nil {
+		return fmt.Errorf("stat source database: %w", err)
+	}
+	if dbInfo.Size() > maxFileSize {
+		return fmt.Errorf("source database size %d exceeds %d byte limit", dbInfo.Size(), maxFileSize)
+	}
+	dbData, err := io.ReadAll(io.LimitReader(dbF, maxFileSize+1))
 	if err != nil {
 		return fmt.Errorf("read source database: %w", err)
+	}
+	if int64(len(dbData)) > maxFileSize {
+		return fmt.Errorf("source database exceeds %d byte limit", maxFileSize)
 	}
 
 	// Compress the database with zstd
@@ -112,10 +129,29 @@ func ExportColpkg(opts ExportColpkgOptions) error {
 		if err := validatePathWithinDir(mediaPath, opts.MediaDir); err != nil {
 			return fmt.Errorf("media path escapes directory for %q: %w", filename, err)
 		}
-		mediaData, err := os.ReadFile(mediaPath)
-		if err != nil {
-			// Skip missing media files (Anki does this too)
+		// Open once and stat the fd to avoid a TOCTOU race between size check and read.
+		mf, mfErr := os.Open(mediaPath)
+		if mfErr != nil {
+			// Skip missing files (Anki does this too)
 			continue
+		}
+		mfInfo, mfErr := mf.Stat()
+		if mfErr != nil {
+			_ = mf.Close()
+			continue
+		}
+		if mfInfo.Size() > maxFileSize {
+			_ = mf.Close()
+			return fmt.Errorf("media file %q size %d exceeds %d byte limit", filename, mfInfo.Size(), maxFileSize)
+		}
+		mediaData, mfErr := io.ReadAll(io.LimitReader(mf, maxFileSize+1))
+		_ = mf.Close()
+		if mfErr != nil {
+			// Skip unreadable media files (Anki does this too)
+			continue
+		}
+		if int64(len(mediaData)) > maxFileSize {
+			return fmt.Errorf("media file %q exceeds %d byte limit", filename, maxFileSize)
 		}
 		if err := addFileToZip(zipWriter, idxStr, mediaData); err != nil {
 			return fmt.Errorf("add media file %s to zip: %w", filename, err)

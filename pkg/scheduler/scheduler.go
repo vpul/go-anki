@@ -113,6 +113,11 @@ func ankiCardToFSRS(card goanki.Card, now time.Time) fsrs.Card {
 		fsrsCard.ScheduledDays = uint64(card.IVL)
 		if card.Mod > 0 {
 			elapsedHours := now.Sub(time.Unix(card.Mod, 0)).Hours()
+			if elapsedHours < 0 {
+				// Clock skew: modification time is in the future.
+				// Treat as if the card was just reviewed.
+				elapsedHours = 0
+			}
 			fsrsCard.ElapsedDays = uint64(elapsedHours / 24)
 		}
 	}

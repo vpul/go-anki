@@ -356,17 +356,17 @@ func (c *Client) FullDownload(ctx context.Context, dbPath string, mediaDir strin
 		return nil, fmt.Errorf("create extraction dir: %w", err)
 	}
 
-	result, err := goanki.ImportColpkg(colpkgPath, extractDir)
+	_, err = goanki.ImportColpkg(colpkgPath, extractDir)
 	if err != nil {
 		return nil, fmt.Errorf("import downloaded colpkg: %w", err)
 	}
 
 	// Atomically move the extracted database to the final location.
 	extractedDB := filepath.Join(extractDir, "collection.anki2")
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0700); err != nil {
 		return nil, fmt.Errorf("create db directory: %w", err)
 	}
-	if err := renameWithCopy(extractedDB, dbPath); err != nil {
+	if err := renameWithCopy(extractedDB, dbPath, 0600); err != nil {
 		return nil, fmt.Errorf("move database to final location: %w", err)
 	}
 
@@ -380,14 +380,14 @@ func (c *Client) FullDownload(ctx context.Context, dbPath string, mediaDir strin
 
 	// Move media files from extraction dir to the specified mediaDir
 	extractedMedia := filepath.Join(extractDir, "collection.media")
-	moveMediaFiles(extractedMedia, mediaDir)
+	movedCount := moveMediaFiles(extractedMedia, mediaDir)
 
 	return &DownloadResult{
 		ModifiedTimestamp:    modTimestamp,
 		UpdateSequenceNumber: usn,
 		DBPath:              dbPath,
 		MediaDir:            mediaDir,
-		MediaFilesImported:   result.MediaFilesImported,
+		MediaFilesImported:   movedCount,
 	}, nil
 }
 
@@ -522,13 +522,13 @@ func mustParseCIDR(s string) *net.IPNet {
 	return network
 }
 
-// copyFile copies a file from src to dst.
-func copyFile(dst, src string) error {
+// copyFile copies a file from src to dst with the given permissions.
+func copyFile(dst, src string, perm os.FileMode) error {
 	data, err := os.ReadFile(src)
 	if err != nil {
 		return fmt.Errorf("read source file: %w", err)
 	}
-	if err := os.WriteFile(dst, data, 0644); err != nil {
+	if err := os.WriteFile(dst, data, perm); err != nil {
 		return fmt.Errorf("write destination file: %w", err)
 	}
 	return nil
@@ -536,12 +536,13 @@ func copyFile(dst, src string) error {
 
 // renameWithCopy renames src to dst, falling back to copy+delete if the
 // rename crosses filesystem boundaries (e.g., /tmp → /data).
-func renameWithCopy(src, dst string) error {
+// The perm parameter is used when falling back to copy.
+func renameWithCopy(src, dst string, perm os.FileMode) error {
 	if err := os.Rename(src, dst); err == nil {
 		return nil
 	}
 	// Fallback: copy then delete (cross-filesystem move)
-	if err := copyFile(dst, src); err != nil {
+	if err := copyFile(dst, src, perm); err != nil {
 		return fmt.Errorf("copy: %w", err)
 	}
 	if err := os.Remove(src); err != nil {
@@ -553,10 +554,12 @@ func renameWithCopy(src, dst string) error {
 
 // moveMediaFiles moves media files from srcDir to dstDir.
 // Missing srcDir is non-fatal (no media to extract).
-func moveMediaFiles(srcDir, dstDir string) {
+// Returns the number of files successfully moved.
+func moveMediaFiles(srcDir, dstDir string) int {
+	moved := 0
 	entries, err := os.ReadDir(srcDir)
 	if err != nil {
-		return // missing or unreadable source dir is non-fatal
+		return 0 // missing or unreadable source dir is non-fatal
 	}
 	for _, f := range entries {
 		if f.IsDir() {
@@ -564,10 +567,13 @@ func moveMediaFiles(srcDir, dstDir string) {
 		}
 		src := filepath.Join(srcDir, f.Name())
 		dst := filepath.Join(dstDir, f.Name())
-		if err := renameWithCopy(src, dst); err != nil {
+		if err := renameWithCopy(src, dst, 0644); err != nil {
 			log.Printf("warning: failed to move media file %s: %v", f.Name(), err)
+		} else {
+			moved++
 		}
 	}
+	return moved
 }
 
 // FullUpload uploads the full collection to AnkiWeb.

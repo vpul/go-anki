@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"sync"
 	"time"
@@ -215,8 +216,14 @@ func (c *Collection) GetDueCards(filter goanki.DueCardsFilter) ([]goanki.Card, e
 	defer func() { _ = rows.Close() }()
 
 	// Preload decks and models for enrichment
-	decks, _ := c.GetDecks()
-	models, _ := c.GetModels()
+	decks, decksErr := c.GetDecks()
+	models, modelsErr := c.GetModels()
+	if decksErr != nil {
+		log.Printf("warning: failed to load decks for enrichment: %v", decksErr)
+	}
+	if modelsErr != nil {
+		log.Printf("warning: failed to load models for enrichment: %v", modelsErr)
+	}
 
 	var cards []goanki.Card
 	for rows.Next() {
@@ -279,14 +286,20 @@ func (c *Collection) GetCardByID(id int64) (*goanki.Card, error) {
 	}
 
 	// Enrich with deck name and content
-	decks, _ := c.GetDecks()
+	decks, decksErr := c.GetDecks()
+	if decksErr != nil {
+		log.Printf("warning: failed to load decks for enrichment: %v", decksErr)
+	}
 	if d, ok := decks[card.DID]; ok {
 		card.DeckName = d.Name
 	}
 
 	note, err := c.getNoteByID(card.NID)
 	if err == nil && note != nil {
-		models, _ := c.GetModels()
+		models, modelsErr := c.GetModels()
+		if modelsErr != nil {
+			log.Printf("warning: failed to load models for enrichment: %v", modelsErr)
+		}
 		if m, ok := models[note.MID]; ok && card.ORD < len(m.Templates) {
 			card.Question, card.Answer = goanki.RenderCard(
 				note.FieldsAsMap(&m), &m.Templates[card.ORD],
