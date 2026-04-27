@@ -280,6 +280,20 @@ func maxBodySize(next http.Handler) http.Handler {
 	})
 }
 
+// recoverPanic is middleware that recovers from panics in HTTP handlers,
+// returning a 500 Internal Server Error instead of dropping the connection.
+func recoverPanic(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if err := recover(); err != nil {
+				log.Printf("panic recovered in HTTP handler: %v", err)
+				errorResponse(w, http.StatusInternalServerError, "internal server error")
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
 // requireAuth is middleware that checks the Authorization: Bearer <token> header
 // against the hashed auth token. If no token is configured, auth is not required.
 func (s *Server) requireAuth(next http.Handler) http.Handler {
@@ -372,7 +386,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/sync/download", s.handleSyncDownload)
 	mux.HandleFunc("POST /api/v1/sync/upload", s.handleSyncUpload)
 
-	return s.rateLimitMiddleware(s.requireAuth(maxBodySize(mux)))
+	return s.rateLimitMiddleware(s.requireAuth(recoverPanic(maxBodySize(mux))))
 }
 
 // ListenAndServe starts the HTTP server on the configured port.

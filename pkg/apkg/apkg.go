@@ -91,7 +91,14 @@ func ExportApkg(opts ExportOptions) error {
 		return fmt.Errorf("media map provided without media directory; set MediaDir to include media files")
 	}
 
-	// Read the source database
+	// Read the source database with size limit
+	dbInfo, err := os.Stat(opts.SourceDB)
+	if err != nil {
+		return fmt.Errorf("stat source database: %w", err)
+	}
+	if dbInfo.Size() > maxFileSize {
+		return fmt.Errorf("source database size %d exceeds %d byte limit", dbInfo.Size(), maxFileSize)
+	}
 	dbData, err := os.ReadFile(opts.SourceDB)
 	if err != nil {
 		return fmt.Errorf("read source database: %w", err)
@@ -144,6 +151,15 @@ func ExportApkg(opts ExportOptions) error {
 		mediaPath := filepath.Join(opts.MediaDir, filename)
 		if err := validatePathWithinDir(mediaPath, opts.MediaDir); err != nil {
 			return fmt.Errorf("media path escapes directory for %q: %w", filename, err)
+		}
+		// Check file size before reading to prevent unbounded memory usage
+		fi, err := os.Stat(mediaPath)
+		if err != nil {
+			// Skip missing files (Anki does this too)
+			continue
+		}
+		if fi.Size() > maxFileSize {
+			return fmt.Errorf("media file %q size %d exceeds %d byte limit", filename, fi.Size(), maxFileSize)
 		}
 		mediaData, err := os.ReadFile(mediaPath)
 		if err != nil {
@@ -499,8 +515,8 @@ func extractZstdZipFileWithLimit(file *zip.File, destPath string, maxSize int64)
 		return 0, fmt.Errorf("file %q decompressed size %d exceeds %d byte limit", file.Name, len(decompressed), maxSize)
 	}
 
-	// Write decompressed data
-	if err := os.WriteFile(destPath, decompressed, 0644); err != nil {
+	// Write decompressed data with restricted permissions (database contains personal data)
+	if err := os.WriteFile(destPath, decompressed, 0600); err != nil {
 		return 0, fmt.Errorf("write file %s: %w", destPath, err)
 	}
 
@@ -539,6 +555,9 @@ func discoverMediaFiles(mediaDir string) (MediaMap, error) {
 		}
 		if err := validateMediaFilename(entry.Name()); err != nil {
 			continue
+		}
+		if idx >= maxFileCount {
+			break
 		}
 		mediaMap[fmt.Sprintf("%d", idx)] = entry.Name()
 		idx++

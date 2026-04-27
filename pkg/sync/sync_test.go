@@ -743,7 +743,7 @@ func TestCopyFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := copyFile(dst, src); err != nil {
+	if err := copyFile(dst, src, 0644); err != nil {
 		t.Fatalf("copyFile: %v", err)
 	}
 
@@ -758,7 +758,7 @@ func TestCopyFile(t *testing.T) {
 
 func TestCopyFileErrors(t *testing.T) {
 	// Test missing source file
-	err := copyFile("/nonexistent/dest.txt", "/nonexistent/source.txt")
+	err := copyFile("/nonexistent/dest.txt", "/nonexistent/source.txt", 0644)
 	if err == nil {
 		t.Error("expected error for missing source file")
 	}
@@ -769,7 +769,7 @@ func TestCopyFileErrors(t *testing.T) {
 	if err := os.WriteFile(src, []byte("test"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	err = copyFile("/nonexistent/path/dest.txt", src)
+	err = copyFile("/nonexistent/path/dest.txt", src, 0644)
 	if err == nil {
 		t.Error("expected error for invalid destination path")
 	}

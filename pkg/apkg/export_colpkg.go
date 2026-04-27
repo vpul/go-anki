@@ -43,7 +43,14 @@ func ExportColpkg(opts ExportColpkgOptions) error {
 		return fmt.Errorf("media map provided without media directory; set MediaDir to include media files")
 	}
 
-	// Read the source database
+	// Read the source database with size limit
+	dbInfo, err := os.Stat(opts.SourceDB)
+	if err != nil {
+		return fmt.Errorf("stat source database: %w", err)
+	}
+	if dbInfo.Size() > maxFileSize {
+		return fmt.Errorf("source database size %d exceeds %d byte limit", dbInfo.Size(), maxFileSize)
+	}
 	dbData, err := os.ReadFile(opts.SourceDB)
 	if err != nil {
 		return fmt.Errorf("read source database: %w", err)
@@ -111,6 +118,15 @@ func ExportColpkg(opts ExportColpkgOptions) error {
 		mediaPath := filepath.Join(opts.MediaDir, filename)
 		if err := validatePathWithinDir(mediaPath, opts.MediaDir); err != nil {
 			return fmt.Errorf("media path escapes directory for %q: %w", filename, err)
+		}
+		// Check file size before reading to prevent unbounded memory usage
+		fi, err := os.Stat(mediaPath)
+		if err != nil {
+			// Skip missing files (Anki does this too)
+			continue
+		}
+		if fi.Size() > maxFileSize {
+			return fmt.Errorf("media file %q size %d exceeds %d byte limit", filename, fi.Size(), maxFileSize)
 		}
 		mediaData, err := os.ReadFile(mediaPath)
 		if err != nil {
