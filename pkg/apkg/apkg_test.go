@@ -163,6 +163,105 @@ func TestPathTraversalInMediaFilename(t *testing.T) {
 	}
 }
 
+func TestExportApkgMediaMapPathTraversal(t *testing.T) {
+	tmpDir := t.TempDir()
+	sourceDB := filepath.Join(tmpDir, "collection.anki2")
+	createMinimalAnkiDB(t, sourceDB)
+
+	// Create a media directory with a legitimate file and a sensitive file outside it
+	mediaDir := filepath.Join(tmpDir, "media")
+	if err := os.MkdirAll(mediaDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mediaDir, "legit.png"), []byte("png-data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Create a file outside the media directory (simulating /etc/passwd)
+	sensitiveFile := filepath.Join(tmpDir, "secret.txt")
+	if err := os.WriteFile(sensitiveFile, []byte("secret-data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	apkgPath := filepath.Join(tmpDir, "traversal.apkg")
+
+	tests := []struct {
+		name    string
+		mediaMap MediaMap
+	}{
+		{
+			name:    "directory_traversal_dotdot",
+			mediaMap: MediaMap{"0": "../secret.txt"},
+		},
+		{
+			name:    "directory_traversal_absolute",
+			mediaMap: MediaMap{"0": "/etc/passwd"},
+		},
+		{
+			name:    "directory_traversal_deep",
+			mediaMap: MediaMap{"0": "subdir/../../secret.txt"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ExportApkg(ExportOptions{
+				SourceDB:   sourceDB,
+				OutputPath: apkgPath,
+				DeckName:   "Traversal Test",
+				MediaDir:   mediaDir,
+				MediaMap:   tt.mediaMap,
+			})
+			if err == nil {
+				t.Error("expected error for path traversal in MediaMap, got nil")
+			}
+		})
+	}
+}
+
+func TestExportColpkgMediaMapPathTraversal(t *testing.T) {
+	tmpDir := t.TempDir()
+	sourceDB := filepath.Join(tmpDir, "collection.anki2")
+	createMinimalAnkiDB(t, sourceDB)
+
+	mediaDir := filepath.Join(tmpDir, "media")
+	if err := os.MkdirAll(mediaDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mediaDir, "legit.png"), []byte("png-data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	colpkgPath := filepath.Join(tmpDir, "traversal.colpkg")
+
+	tests := []struct {
+		name    string
+		mediaMap MediaMap
+	}{
+		{
+			name:    "directory_traversal_dotdot",
+			mediaMap: MediaMap{"0": "../secret.txt"},
+		},
+		{
+			name:    "directory_traversal_absolute",
+			mediaMap: MediaMap{"0": "/etc/passwd"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ExportColpkg(ExportColpkgOptions{
+				SourceDB:   sourceDB,
+				OutputPath: colpkgPath,
+				MediaDir:   mediaDir,
+				MediaMap:   tt.mediaMap,
+			})
+			if err == nil {
+				t.Error("expected error for path traversal in MediaMap, got nil")
+			}
+		})
+	}
+}
+
 // createMinimalAnkiDB creates a minimal valid Anki database for testing.
 func createMinimalAnkiDB(t *testing.T, path string) []byte {
 	t.Helper()

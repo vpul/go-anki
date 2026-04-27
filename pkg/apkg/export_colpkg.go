@@ -105,7 +105,13 @@ func ExportColpkg(opts ExportColpkgOptions) error {
 
 	// Add media files
 	for idxStr, filename := range mediaMap {
+		if err := validateMediaFilename(filename); err != nil {
+			return fmt.Errorf("invalid media filename %q in map: %w", filename, err)
+		}
 		mediaPath := filepath.Join(opts.MediaDir, filename)
+		if err := validatePathWithinDir(mediaPath, opts.MediaDir); err != nil {
+			return fmt.Errorf("media path escapes directory for %q: %w", filename, err)
+		}
 		mediaData, err := os.ReadFile(mediaPath)
 		if err != nil {
 			// Skip missing media files (Anki does this too)
