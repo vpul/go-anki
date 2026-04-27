@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -120,7 +121,6 @@ func ExportApkg(opts ExportOptions) error {
 	defer func() { _ = outFile.Close() }()
 
 	zipWriter := zip.NewWriter(outFile)
-	defer func() { _ = zipWriter.Close() }()
 
 	// Add collection.anki2
 	if err := addFileToZip(zipWriter, "collection.anki2", dbData); err != nil {
@@ -149,6 +149,9 @@ func ExportApkg(opts ExportOptions) error {
 		}
 	}
 
+	if err := zipWriter.Close(); err != nil {
+		return fmt.Errorf("close zip writer: %w", err)
+	}
 	return nil
 }
 
@@ -214,7 +217,11 @@ func ImportApkg(apkgPath string, destDir string) (*ImportResult, error) {
 			if totalSize > maxTotalSize {
 				return nil, fmt.Errorf("total decompressed size exceeds %d byte limit", maxTotalSize)
 			}
-			_ = json.Unmarshal(data, &mediaMap)
+			if err := json.Unmarshal(data, &mediaMap); err != nil {
+				// Log but don't fail: a malformed media map shouldn't
+				// prevent the rest of the deck from importing.
+				log.Printf("warning: failed to parse media map: %v", err)
+			}
 		}
 	}
 
@@ -315,7 +322,11 @@ func ImportColpkg(colpkgPath string, destDir string) (*ImportResult, error) {
 			if totalSize > maxTotalSize {
 				return nil, fmt.Errorf("total decompressed size exceeds %d byte limit", maxTotalSize)
 			}
-			_ = json.Unmarshal(data, &mediaMap)
+			if err := json.Unmarshal(data, &mediaMap); err != nil {
+				// Log but don't fail: a malformed media map shouldn't
+				// prevent the rest of the deck from importing.
+				log.Printf("warning: failed to parse media map: %v", err)
+			}
 		}
 	}
 

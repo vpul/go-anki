@@ -44,13 +44,15 @@ const (
 type CardQueue int
 
 const (
-	QueueManual     CardQueue = -3 // Card is in a filtered deck
-	QueueSuspended  CardQueue = -2
-	QueueSchedBuried CardQueue = -1
-	QueueUserBuried CardQueue = -1 // Same value, distinguished by context
-	QueueNew        CardQueue = 0
-	QueueLearning   CardQueue = 1
-	QueueReview     CardQueue = 2
+	QueueSuspended  CardQueue = -1 // Card is suspended
+	QueueSchedBuried CardQueue = -2 // Buried by scheduler
+	QueueUserBuried CardQueue = -3 // Buried by user (AKA manually buried)
+	// QueueManual is a deprecated alias for QueueUserBuried (-3).
+	// Filtered deck status is tracked by ODID, not by queue value.
+	QueueManual  CardQueue = -3
+	QueueNew      CardQueue = 0
+	QueueLearning CardQueue = 1
+	QueueReview   CardQueue = 2
 	QueueDayLearn   CardQueue = 3 // Learning but shown on review day
 )
 

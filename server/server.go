@@ -28,6 +28,10 @@ import (
 const (
 	// maxBodyBytes is the maximum allowed request body size (1MB).
 	maxBodyBytes int64 = 1 << 20
+
+	// maxTrackedIPs caps the number of distinct IP addresses tracked by the
+	// rate limiter, preventing memory exhaustion from unbounded map growth.
+	maxTrackedIPs = 50000
 )
 
 // ServerOption is a functional option for configuring a Server.
@@ -93,6 +97,7 @@ type rateLimiter struct {
 	mu       stdsync.Mutex
 	requests map[string][]time.Time
 	limit    int // requests per minute
+	maxIPs   int // maximum number of distinct IPs tracked (prevents memory DoS)
 }
 
 // rateLimitResult indicates whether a request is allowed.
@@ -126,6 +131,11 @@ func (rl *rateLimiter) allow(ip string) rateLimitResult {
 			retryAfter = 0
 		}
 		return rateLimitResult{allowed: false, retryAfter: time.Duration(retryAfter * float64(time.Second))}
+	}
+
+	// If this is a new IP and we've hit the max IPs cap, reject
+	if len(timestamps) == 0 && rl.maxIPs > 0 && len(rl.requests) >= rl.maxIPs {
+		return rateLimitResult{allowed: false, retryAfter: time.Minute}
 	}
 
 	valid = append(valid, now)
@@ -170,6 +180,10 @@ type Server struct {
 	rateLimit     int // requests per minute per IP; 0 = disabled
 	closeCh       chan struct{}
 	limiter       *rateLimiter
+	syncMu        stdsync.Mutex // Serializes concurrent sync operations (download/upload).
+	// Note: This does not protect against sync-vs-write races.
+	// Write handlers (handleAnswer, handleAddNote, etc.) go through
+	// withMode and acquire their own DB-level locks via SQLite WAL.
 }
 
 // NewServer creates a new Server with the given database path and options.
@@ -311,9 +325,9 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 		s.limiter = &rateLimiter{
 			requests: make(map[string][]time.Time),
 			limit:    s.rateLimit,
+			maxIPs:   maxTrackedIPs,
 		}
 	}
-
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip, _, err := net.SplitHostPort(r.RemoteAddr)
 		if err != nil {
@@ -381,6 +395,7 @@ func (s *Server) ListenAndServe() error {
 			s.limiter = &rateLimiter{
 				requests: make(map[string][]time.Time),
 				limit:    s.rateLimit,
+				maxIPs:   maxTrackedIPs,
 			}
 		}
 		go func() {
@@ -612,6 +627,9 @@ func (s *Server) handleAddNote(col *collection.Collection, w http.ResponseWriter
 
 // handleSyncDownload performs a full download from AnkiWeb.
 func (s *Server) handleSyncDownload(w http.ResponseWriter, r *http.Request) {
+	s.syncMu.Lock()
+	defer s.syncMu.Unlock()
+
 	if s.syncConfig == nil {
 		errorResponse(w, http.StatusBadRequest, "sync not configured: set SyncConfig")
 		return
@@ -658,6 +676,9 @@ func (s *Server) handleSyncDownload(w http.ResponseWriter, r *http.Request) {
 
 // handleSyncUpload performs a full upload to AnkiWeb.
 func (s *Server) handleSyncUpload(w http.ResponseWriter, r *http.Request) {
+	s.syncMu.Lock()
+	defer s.syncMu.Unlock()
+
 	if s.syncConfig == nil {
 		errorResponse(w, http.StatusBadRequest, "sync not configured: set SyncConfig")
 		return
