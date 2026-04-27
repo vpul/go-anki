@@ -637,7 +637,8 @@ func (s *Server) handleSyncDownload(w http.ResponseWriter, r *http.Request) {
 
 	client, err := sync.NewClient(*s.syncConfig)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
+		log.Printf("create sync client: %v", err)
+		errorResponse(w, http.StatusInternalServerError, "sync client initialization failed")
 		return
 	}
 	ctx := r.Context()
@@ -686,7 +687,8 @@ func (s *Server) handleSyncUpload(w http.ResponseWriter, r *http.Request) {
 
 	client, err := sync.NewClient(*s.syncConfig)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
+		log.Printf("create sync client: %v", err)
+		errorResponse(w, http.StatusInternalServerError, "sync client initialization failed")
 		return
 	}
 	ctx := r.Context()
