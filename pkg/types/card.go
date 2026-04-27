@@ -47,9 +47,9 @@ const (
 	QueueSuspended  CardQueue = -1 // Card is suspended
 	QueueSchedBuried CardQueue = -2 // Buried by scheduler
 	QueueUserBuried CardQueue = -3 // Buried by user (AKA manually buried)
-	// NOTE: QueueManual is an alias for QueueUserBuried. Use QueueUserBuried.
-	// Retained for backward compatibility.
-	QueueManual  CardQueue = -3 // Card is in a filtered deck OR manually buried (deprecated alias)
+	// QueueManual is a deprecated alias for QueueUserBuried (-3).
+	// Filtered deck status is tracked by ODID, not by queue value.
+	QueueManual  CardQueue = -3
 	QueueNew      CardQueue = 0
 	QueueLearning CardQueue = 1
 	QueueReview   CardQueue = 2

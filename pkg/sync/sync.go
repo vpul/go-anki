@@ -424,7 +424,10 @@ func ssrfSafeDialContext(ctx context.Context, network, addr string) (net.Conn, e
 		}
 	}
 
-	// Connect directly using the first resolved IP to prevent rebinding
+	// Connect directly to the first resolved IP only (no fallback to ips[1..n]).
+	// This is intentional: we validate ALL resolved IPs above, and connecting to
+	// a single deterministic IP prevents an attacker from observing which IP
+	// was reached. Fallback would also complicate the security reasoning.
 	dialer := &net.Dialer{Timeout: 30 * time.Second}
 	return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
 }

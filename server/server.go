@@ -28,6 +28,10 @@ import (
 const (
 	// maxBodyBytes is the maximum allowed request body size (1MB).
 	maxBodyBytes int64 = 1 << 20
+
+	// maxTrackedIPs caps the number of distinct IP addresses tracked by the
+	// rate limiter, preventing memory exhaustion from unbounded map growth.
+	maxTrackedIPs = 50000
 )
 
 // ServerOption is a functional option for configuring a Server.
@@ -176,7 +180,10 @@ type Server struct {
 	rateLimit     int // requests per minute per IP; 0 = disabled
 	closeCh       chan struct{}
 	limiter       *rateLimiter
-	syncMu        stdsync.Mutex // serializes sync operations vs collection writes
+	syncMu        stdsync.Mutex // Serializes concurrent sync operations (download/upload).
+	// Note: This does not protect against sync-vs-write races.
+	// Write handlers (handleAnswer, handleAddNote, etc.) go through
+	// withMode and acquire their own DB-level locks via SQLite WAL.
 }
 
 // NewServer creates a new Server with the given database path and options.
@@ -318,7 +325,7 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 		s.limiter = &rateLimiter{
 			requests: make(map[string][]time.Time),
 			limit:    s.rateLimit,
-			maxIPs:   50000, // cap distinct IPs to prevent memory DoS
+			maxIPs:   maxTrackedIPs,
 		}
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -388,7 +395,7 @@ func (s *Server) ListenAndServe() error {
 			s.limiter = &rateLimiter{
 				requests: make(map[string][]time.Time),
 				limit:    s.rateLimit,
-				maxIPs:   50000, // cap distinct IPs to prevent memory DoS
+				maxIPs:   maxTrackedIPs,
 			}
 		}
 		go func() {
