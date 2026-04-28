@@ -70,6 +70,9 @@ type Answer struct {
 	Review ReviewLog `json:"review"` // Review log entry to insert
 }
 
+// MaxCardsPerQuery is the upper bound on cards returned by a single due-cards query.
+const MaxCardsPerQuery = 1000
+
 // DueCardsFilter is used to filter due cards queries.
 type DueCardsFilter struct {
 	DeckName string `json:"deck_name,omitempty"` // Filter by deck name

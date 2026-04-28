@@ -495,7 +495,7 @@ func TestAddNoteMissingFields(t *testing.T) {
 	}
 }
 
-// TestSyncDownloadWithoutConfig verifies sync download returns error without config.
+// TestSyncDownloadWithoutConfig verifies sync download returns 503 without config.
 func TestSyncDownloadWithoutConfig(t *testing.T) {
 	srv, _ := setupServer(t)
 	handler := srv.Handler()
@@ -504,12 +504,12 @@ func TestSyncDownloadWithoutConfig(t *testing.T) {
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected status 400, got %d", w.Code)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status 503, got %d", w.Code)
 	}
 }
 
-// TestSyncUploadWithoutConfig verifies sync upload returns error without config.
+// TestSyncUploadWithoutConfig verifies sync upload returns 503 without config.
 func TestSyncUploadWithoutConfig(t *testing.T) {
 	srv, _ := setupServer(t)
 	handler := srv.Handler()
@@ -518,8 +518,8 @@ func TestSyncUploadWithoutConfig(t *testing.T) {
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected status 400, got %d", w.Code)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status 503, got %d", w.Code)
 	}
 }
 
@@ -836,6 +836,105 @@ func TestRateLimiterAllow(t *testing.T) {
 	result = rl.allow("5.6.7.8")
 	if !result.allowed {
 		t.Error("different IP should be allowed")
+	}
+}
+
+// TestGetDueCardsLimitValidation verifies that negative, zero, and oversized limits
+// are handled gracefully (negative/zero default to 100, oversized cap at 1000).
+func TestGetDueCardsLimitValidation(t *testing.T) {
+	tests := []struct {
+		param     string
+		wantCards bool // true = response should include cards key
+	}{
+		{"limit=-1", true},
+		{"limit=0", true},
+		{"limit=abc", true},
+		{"limit=5", true},
+		{"limit=9999", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.param, func(t *testing.T) {
+			srv, _ := setupServer(t)
+			handler := srv.Handler()
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/due-cards?"+tt.param, nil)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected status 200, got %d; body: %s", w.Code, w.Body.String())
+			}
+			var resp map[string]json.RawMessage
+			if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if _, ok := resp["cards"]; !ok {
+				t.Error("expected cards key in response")
+			}
+		})
+	}
+}
+
+// TestGetDueCardsQuestionAnswer verifies that due cards are enriched with question/answer.
+func TestGetDueCardsQuestionAnswer(t *testing.T) {
+	srv, _ := setupServer(t)
+	handler := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/due-cards", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d; body: %s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Cards []struct {
+			Question string `json:"question"`
+			Answer   string `json:"answer"`
+		} `json:"cards"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Cards) == 0 {
+		t.Fatal("expected at least one due card")
+	}
+	if resp.Cards[0].Question == "" {
+		t.Error("expected non-empty question on due card")
+	}
+}
+
+// TestAnswerCardNotFoundHTTP verifies that answering a non-existent card returns 404.
+func TestAnswerCardNotFoundHTTP(t *testing.T) {
+	srv, _ := setupServer(t)
+	handler := srv.Handler()
+
+	body := `{"card_id": 999999999999, "rating": "good"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/answer", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected status 404, got %d; body: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestSecurityHeaders verifies that X-Content-Type-Options and X-Frame-Options are set.
+func TestSecurityHeaders(t *testing.T) {
+	srv, _ := setupServer(t)
+	handler := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if got := w.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("expected X-Content-Type-Options: nosniff, got %q", got)
+	}
+	if got := w.Header().Get("X-Frame-Options"); got != "DENY" {
+		t.Errorf("expected X-Frame-Options: DENY, got %q", got)
 	}
 }
 

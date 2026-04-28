@@ -63,9 +63,14 @@ func (s *FSRSScheduler) Answer(card goanki.Card, rating goanki.Rating, now time.
 		interval = -1 // Anki convention
 	}
 
+	revID, err := randIntn(1000)
+	if err != nil {
+		return nil, fmt.Errorf("generate review ID: %w", err)
+	}
+
 	// Create review log entry
 	review := goanki.ReviewLog{
-		ID:      now.UnixMilli()*1000 + int64(randIntn(1000)), // millisecond ID + random to avoid sub-ms collisions
+		ID:      now.UnixMilli()*1000 + int64(revID), // millisecond ID + random to avoid sub-ms collisions
 		CID:     card.ID,
 		USN:     -1, // Not yet synced
 		Ease:    rating,
@@ -252,20 +257,20 @@ func ankiRatingToFSRS(rating goanki.Rating) fsrs.Rating {
 
 // randIntn generates a cryptographically random integer in [0, n).
 // Uses rejection sampling to avoid modulo bias.
-func randIntn(n int) int {
+func randIntn(n int) (int, error) {
 	if n <= 0 {
-		return 0
+		return 0, nil
 	}
 	threshold := uint32(0xFFFFFFFF-uint32(n)) + 1
 	threshold -= threshold % uint32(n)
 	b := make([]byte, 4)
 	for {
 		if _, err := rand.Read(b); err != nil {
-			panic(fmt.Sprintf("crypto/rand.Read failed: %v", err))
+			return 0, fmt.Errorf("crypto/rand.Read: %w", err)
 		}
 		v := binary.BigEndian.Uint32(b)
 		if v < threshold {
-			return int(v % uint32(n))
+			return int(v % uint32(n)), nil
 		}
 	}
 }
