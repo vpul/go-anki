@@ -186,16 +186,21 @@ func (c *Collection) GetDueCards(filter goanki.DueCardsFilter) ([]goanki.Card, e
 		dayCutoff = time.Now().Unix() / secondsPerDay
 	}
 
+	// Queue 0/2/3: due is a day-number, compared against dayCutoff.
+	// Queue 1 (intraday learning): due is a Unix timestamp; use wall-clock seconds.
 	query := `
 		SELECT c.id, c.nid, c.did, c.ord, c.mod, c.usn,
 		       c.type, c.queue, c.due, c.ivl, c.factor,
 		       c.reps, c.lapses, c.left, c.odue, c.odid,
 		       c.flags, c.data
 		FROM cards c
-		WHERE c.queue IN (0, 1, 2, 3)
-		  AND c.due <= ?`
+		WHERE (
+		    (c.queue IN (0, 2, 3) AND c.due <= ?)
+		    OR (c.queue = 1 AND c.due <= ?)
+		)`
 
-	args := []interface{}{dayCutoff}
+	now := time.Now().Unix()
+	args := []interface{}{dayCutoff, now}
 
 	// Filter by deck if specified
 	if filter.DeckName != "" {

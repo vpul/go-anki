@@ -347,6 +347,9 @@ func TestGetDueCardsQuestionAnswer(t *testing.T) {
 	if cards[0].Question == "" {
 		t.Error("expected non-empty question on due card")
 	}
+	if cards[0].Answer == "" {
+		t.Error("expected non-empty answer on due card")
+	}
 }
 
 func TestAnswerCardNotFound(t *testing.T) {
