@@ -71,6 +71,9 @@ type Answer struct {
 }
 
 // MaxCardsPerQuery is the upper bound on cards returned by a single due-cards query.
+// The value 1000 determines how many ? placeholders appear in the IN clause.
+// Safe with modernc.org/sqlite (bundles SQLite 3.46+, SQLITE_MAX_VARIABLE_NUMBER=32766).
+// If the driver is ever swapped, verify the build's SQLITE_MAX_VARIABLE_NUMBER ≥ 1000.
 const MaxCardsPerQuery = 1000
 
 // DueCardsFilter is used to filter due cards queries.

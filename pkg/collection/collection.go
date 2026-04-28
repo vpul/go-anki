@@ -186,7 +186,8 @@ func (c *Collection) GetDueCards(filter goanki.DueCardsFilter) ([]goanki.Card, e
 		dayCutoff = time.Now().Unix() / secondsPerDay
 	}
 
-	// Queue 0/2/3: due is a day-number, compared against dayCutoff.
+	// Queue 0 (new): due is a position/order number (always ≤ dayCutoff as it grows).
+	// Queue 2/3 (review/relearning): due is a day-number, compared against dayCutoff.
 	// Queue 1 (intraday learning): due is a Unix timestamp; use wall-clock seconds.
 	query := `
 		SELECT c.id, c.nid, c.did, c.ord, c.mod, c.usn,
@@ -200,7 +201,7 @@ func (c *Collection) GetDueCards(filter goanki.DueCardsFilter) ([]goanki.Card, e
 		)`
 
 	now := time.Now().Unix()
-	args := []interface{}{dayCutoff, now}
+	args := []any{dayCutoff, now}
 
 	// Filter by deck if specified
 	if filter.DeckName != "" {
@@ -389,7 +390,7 @@ func (c *Collection) GetStats() (*goanki.Stats, error) {
 
 // ifaceToStr converts a scanned SQLite value to a string.
 // In v18+ schema, sfld and csum columns may be INTEGER or TEXT depending on Anki's behavior.
-func ifaceToStr(v interface{}) string {
+func ifaceToStr(v any) string {
 	switch t := v.(type) {
 	case string:
 		return t
@@ -447,7 +448,7 @@ func (c *Collection) getNotesByIDs(ids []int64) (map[int64]*goanki.Note, error) 
 
 	// Deduplicate IDs to keep the IN clause minimal
 	seen := make(map[int64]struct{}, len(ids))
-	unique := make([]interface{}, 0, len(ids))
+	unique := make([]any, 0, len(ids))
 	for _, id := range ids {
 		if _, ok := seen[id]; !ok {
 			seen[id] = struct{}{}
