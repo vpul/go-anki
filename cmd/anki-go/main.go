@@ -449,6 +449,9 @@ func runServe() error {
 	}
 
 	if *authToken != "" {
+		if len(*authToken) < 16 {
+			return fmt.Errorf("auth-token must be at least 16 characters")
+		}
 		opts = append(opts, server.WithAuthToken(*authToken))
 	}
 

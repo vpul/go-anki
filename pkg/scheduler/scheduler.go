@@ -259,7 +259,7 @@ func ankiRatingToFSRS(rating goanki.Rating) fsrs.Rating {
 // Uses rejection sampling to avoid modulo bias.
 func randIntn(n int) (int, error) {
 	if n <= 0 {
-		return 0, nil
+		return 0, fmt.Errorf("randIntn: n must be positive, got %d", n)
 	}
 	threshold := uint32(0xFFFFFFFF-uint32(n)) + 1
 	threshold -= threshold % uint32(n)

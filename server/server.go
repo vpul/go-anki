@@ -345,7 +345,7 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 
 // rateLimitMiddleware applies per-IP rate limiting.
 func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
-	if s.rateLimit <= 0 || s.limiter == nil {
+	if s.rateLimit <= 0 {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -478,9 +478,6 @@ func (s *Server) handleGetDueCards(col *collection.Collection, w http.ResponseWr
 		if n, err := strconv.Atoi(limitStr); err == nil && n > 0 {
 			filter.Limit = n
 		}
-		// Invalid or non-positive values are silently ignored and fall through
-		// to the default below. Returning 400 for limit=0 or limit=-1 would be
-		// overly strict for a read-only convenience parameter.
 	}
 	if filter.Limit <= 0 {
 		filter.Limit = 100

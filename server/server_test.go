@@ -903,6 +903,9 @@ func TestGetDueCardsQuestionAnswer(t *testing.T) {
 	if resp.Cards[0].Question == "" {
 		t.Error("expected non-empty question on due card")
 	}
+	if resp.Cards[0].Answer == "" {
+		t.Error("expected non-empty answer on due card")
+	}
 }
 
 // TestAnswerCardNotFoundHTTP verifies that answering a non-existent card returns 404.

@@ -358,6 +358,11 @@ func (c *Collection) AddNote(input goanki.NewNote) (int64, error) {
 
 	// Create cards for each template
 	for _, tmpl := range model.Templates {
+		// cardID = noteID + tmpl.ORD*1000 + rand(1000)
+		// The noteID timestamp has millisecond precision (now*1000 + rand(1000)).
+		// Two notes created in the same millisecond where |noteID_A - noteID_B| < 1000
+		// could still produce overlapping card ID ranges — extremely unlikely in practice
+		// since Anki usage rarely creates multiple notes in the same millisecond.
 		cardID := noteID + int64(tmpl.ORD)*1000 + int64(randInt(1000))
 		_, err = tx.Exec(`
 			INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl,
