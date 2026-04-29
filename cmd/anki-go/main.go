@@ -428,7 +428,10 @@ func runSyncUpload() error {
 // runServe starts the HTTP API server.
 func runServe() error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	db := fs.String("db", "collection.anki2", "path to collection database")
+	// --db defaults to empty so we can detect if it was explicitly set
+	// (mutual exclusion with --collections).
+	db := fs.String("db", "", "path to collection database (default: collection.anki2; mutually exclusive with --collections)")
+	collections := fs.String("collections", "", "multi-collection mode: comma-separated name:path pairs, e.g. main:/path/a.anki2,work:/path/b.anki2 (mutually exclusive with --db)")
 	media := fs.String("media", "collection.media", "media directory path")
 	port := fs.Int("port", 8765, "HTTP server port")
 	authToken := fs.String("auth-token", envOr("ANKIGO_AUTH_TOKEN", ""), "bearer token for HTTP authentication (or set $ANKIGO_AUTH_TOKEN)")
@@ -436,6 +439,10 @@ func runServe() error {
 	password := envOr("ANKIWEB_PASSWORD", "")
 	if err := fs.Parse(reorderFlags(os.Args[2:], boolFlagsFor(fs))); err != nil {
 		return fmt.Errorf("parse flags: %w", err)
+	}
+
+	if *db != "" && *collections != "" {
+		return fmt.Errorf("--db and --collections are mutually exclusive")
 	}
 
 	if *port < 1 || *port > 65535 {
@@ -462,9 +469,28 @@ func runServe() error {
 		}))
 	}
 
-	srv := server.NewServer(*db, opts...)
+	var dbPath string
+	if *collections != "" {
+		colMap, err := server.ParseCollections(*collections)
+		if err != nil {
+			return fmt.Errorf("parse --collections: %w", err)
+		}
+		reg, err := server.NewCollectionRegistry(colMap)
+		if err != nil {
+			return fmt.Errorf("create collection registry: %w", err)
+		}
+		opts = append(opts, server.WithCollectionRegistry(reg))
+		names := reg.Names()
+		fmt.Printf("go-anki server starting on :%d (multi-collection: %s)\n", *port, strings.Join(names, ", "))
+	} else {
+		dbPath = *db
+		if dbPath == "" {
+			dbPath = "collection.anki2"
+		}
+		fmt.Printf("go-anki server starting on :%d (db: %s)\n", *port, dbPath)
+	}
 
-	fmt.Printf("go-anki server starting on :%d (db: %s)\n", *port, *db)
+	srv := server.NewServer(dbPath, opts...)
 	return srv.ListenAndServe()
 }
 
