@@ -198,7 +198,7 @@ type Server struct {
 	closeCh       chan struct{}
 	limiter       *rateLimiter
 	syncMu        stdsync.Mutex       // Serializes concurrent sync operations (download/upload).
-	writeMu       stdsync.RWMutex     // Protects dbPath from sync-vs-write races. Write handlers RLock, sync Lock.
+	writeMu       stdsync.RWMutex     // Protects dbPath from concurrent write handlers and sync. Both acquire exclusive Lock.
 	serverMu      stdsync.Mutex       // Protects httpServer field from concurrent access
 	httpServer    *http.Server        // Stored for graceful shutdown in Close()
 }
@@ -286,8 +286,8 @@ func jsonResponse(w http.ResponseWriter, v interface{}) {
 
 // withMode opens a collection with the given mode, calls fn, and closes it.
 // It handles DB locking errors and returns appropriate HTTP error responses.
-// For ReadWrite mode, it acquires writeMu.RLock() to prevent concurrent sync
-// operations from replacing the DB file while writes are in progress.
+// For ReadWrite mode, it acquires writeMu.Lock() to prevent concurrent write
+// handlers or sync operations from replacing the DB file while writes are in progress.
 func (s *Server) withMode(mode collection.OpenMode, fn func(col *collection.Collection, w http.ResponseWriter, r *http.Request)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if mode == collection.ReadWrite {
