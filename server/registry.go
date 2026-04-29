@@ -3,9 +3,13 @@ package server
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 )
+
+// validNameRE matches collection names containing only alphanumeric chars, hyphens, and underscores.
+var validNameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
 
 // CollectionRegistry maps collection names to .anki2 file paths.
 type CollectionRegistry struct {
@@ -21,6 +25,9 @@ func NewCollectionRegistry(collections map[string]string) (*CollectionRegistry, 
 	for name, path := range collections {
 		if name == "" {
 			return nil, fmt.Errorf("collection name cannot be empty")
+		}
+		if !validNameRE.MatchString(name) {
+			return nil, fmt.Errorf("collection name %q contains invalid characters (allowed: a-z, A-Z, 0-9, hyphen, underscore)", name)
 		}
 		info, err := os.Stat(path)
 		if err != nil {

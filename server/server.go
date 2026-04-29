@@ -213,6 +213,9 @@ type Server struct {
 	rateLimit     int // requests per minute per IP; 0 = disabled
 	closeCh       chan struct{}
 	limiter       *rateLimiter
+	// NOTE: syncMu and writeMu are server-wide locks. In multi-collection mode, a sync/write
+	// to collection-A blocks sync/writes to collection-B. This is a known simplification —
+	// per-collection locks could be added later for better throughput under concurrent access.
 	syncMu        stdsync.Mutex   // Serializes concurrent sync operations (download/upload).
 	writeMu       stdsync.RWMutex // Protects dbPath from concurrent write handlers and sync. Both acquire exclusive Lock.
 	serverMu      stdsync.Mutex   // Protects httpServer field from concurrent access
@@ -478,17 +481,21 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 // handleHealth returns the server health status.
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	if s.registry != nil {
-		// Multi-collection mode: spot-check the first collection.
+		// Multi-collection mode: check all collections, return 503 if any fail.
 		names := s.registry.Names()
-		if len(names) > 0 {
-			if path, err := s.registry.Resolve(names[0]); err == nil {
-				col, err := collection.Open(path, collection.ReadOnly)
-				if err != nil {
-					errorResponse(w, http.StatusServiceUnavailable, "database unavailable")
-					return
-				}
-				_ = col.Close()
+		for _, name := range names {
+			path, err := s.registry.Resolve(name)
+			if err != nil {
+				errorResponse(w, http.StatusServiceUnavailable, "database unavailable")
+				return
 			}
+			col, err := collection.Open(path, collection.ReadOnly)
+			if err != nil {
+				_ = col.Close()
+				errorResponse(w, http.StatusServiceUnavailable, "database unavailable")
+				return
+			}
+			_ = col.Close()
 		}
 	} else if s.dbPath != "" {
 		col, err := collection.Open(s.dbPath, collection.ReadOnly)

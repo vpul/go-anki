@@ -113,4 +113,4 @@ golangci-lint run ./...
 - [ ] Incremental delta sync (bidirectional changes — USN tracking, conflict resolution)
 - [ ] Media sync (AnkiWeb `/msync/` API — images, audio files)
 - [ ] AnkiWeb streaming sync (chunked transfers, avoid loading full DB into memory)
-- [ ] Multiple collection support (server handles multiple .anki2 files simultaneously)
+- [x] Multiple collection support (server handles multiple .anki2 files simultaneously)

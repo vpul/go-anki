@@ -2,11 +2,15 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
+	goanki "github.com/vpul/go-anki/pkg/collection"
+	ankitypes "github.com/vpul/go-anki/pkg/types"
 	"github.com/vpul/go-anki/pkg/scheduler"
 )
 
@@ -427,6 +431,8 @@ func TestSingleCollectionBackwardCompat(t *testing.T) {
 		{http.MethodGet, "/api/v1/stats", "", http.StatusOK},
 		{http.MethodGet, "/api/v1/version", "", http.StatusOK},
 		{http.MethodGet, "/health", "", http.StatusOK},
+		{http.MethodPost, "/api/v1/decks", `{"name": "Compat Test Deck"}`, http.StatusOK},
+		{http.MethodPost, "/api/v1/notes", `{"deck_name": "Default", "model_name": "Basic", "fields": {"Front": "Q", "Back": "A"}}`, http.StatusOK},
 	}
 
 	for _, tc := range cases {
@@ -438,6 +444,9 @@ func TestSingleCollectionBackwardCompat(t *testing.T) {
 				bodyReader = strings.NewReader("")
 			}
 			req := httptest.NewRequest(tc.method, tc.path, bodyReader)
+			if tc.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
 			w := httptest.NewRecorder()
 			handler.ServeHTTP(w, req)
 
@@ -491,6 +500,100 @@ func TestMultiCollectionHealthCheck(t *testing.T) {
 	}
 	if resp["status"] != "ok" {
 		t.Errorf("expected status ok, got %q", resp["status"])
+	}
+}
+
+// TestMultiCollectionGetCardByID verifies GET /api/v1/collections/{name}/cards/{id}.
+func TestMultiCollectionGetCardByID(t *testing.T) {
+	db1 := createTestDB(t)
+
+	reg, err := NewCollectionRegistry(map[string]string{"main": db1})
+	if err != nil {
+		t.Fatalf("NewCollectionRegistry: %v", err)
+	}
+
+	srv := NewServer("", WithScheduler(scheduler.NewFSRSScheduler()), WithCollectionRegistry(reg))
+	handler := srv.Handler()
+
+	// Find a card ID from the collection
+	col, err := goanki.Open(db1, goanki.ReadOnly)
+	if err != nil {
+		t.Fatalf("open collection: %v", err)
+	}
+	cards, err := col.GetDueCards(ankitypes.DueCardsFilter{})
+	_ = col.Close()
+	if err != nil || len(cards) == 0 {
+		t.Fatalf("no cards found: %v", err)
+	}
+	cardID := cards[0].ID
+
+	url := "/api/v1/collections/main/cards/" + strconv.FormatInt(cardID, 10)
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d; body: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]json.RawMessage
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if _, ok := resp["card"]; !ok {
+		t.Error("expected card key in response")
+	}
+	if _, ok := resp["collection"]; !ok {
+		t.Error("expected collection key in response")
+	}
+}
+
+// TestMultiCollectionAnswer verifies POST /api/v1/collections/{name}/answer.
+func TestMultiCollectionAnswer(t *testing.T) {
+	db1 := createTestDB(t)
+
+	reg, err := NewCollectionRegistry(map[string]string{"main": db1})
+	if err != nil {
+		t.Fatalf("NewCollectionRegistry: %v", err)
+	}
+
+	srv := NewServer("", WithScheduler(scheduler.NewFSRSScheduler()), WithCollectionRegistry(reg))
+	handler := srv.Handler()
+
+	// Find a card ID from the collection
+	col, err := goanki.Open(db1, goanki.ReadOnly)
+	if err != nil {
+		t.Fatalf("open collection: %v", err)
+	}
+	cards, err := col.GetDueCards(ankitypes.DueCardsFilter{})
+	_ = col.Close()
+	if err != nil || len(cards) == 0 {
+		t.Fatalf("no cards: %v", err)
+	}
+
+	cardID := cards[0].ID
+	body := fmt.Sprintf(`{"card_id": %d, "rating": "good"}`, cardID)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/collections/main/answer", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d; body: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]json.RawMessage
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if _, ok := resp["card"]; !ok {
+		t.Error("expected card key in response")
+	}
+	if _, ok := resp["review"]; !ok {
+		t.Error("expected review key in response")
+	}
+	if _, ok := resp["collection"]; !ok {
+		t.Error("expected collection key in response")
 	}
 }
 
