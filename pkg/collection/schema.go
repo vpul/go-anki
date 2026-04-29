@@ -255,7 +255,7 @@ func parseTemplateConfig(data []byte) (qfmt, afmt string) {
 			data = data[8:]
 		case 2: // length-delimited
 			length, n := decodeVarint(data)
-			if n <= 0 || int(length) > len(data[n:]) || int(length) > maxProtobufFieldLen {
+			if n <= 0 || length > uint64(len(data[n:])) || length > uint64(maxProtobufFieldLen) {
 				break
 			}
 			data = data[n:]
@@ -321,7 +321,7 @@ func parseNotetypeConfig(data []byte, m goanki.Model) goanki.Model {
 			data = data[8:]
 		case 2: // length-delimited
 			length, n := decodeVarint(data)
-			if n <= 0 || int(length) > len(data[n:]) || int(length) > maxProtobufFieldLen {
+			if n <= 0 || length > uint64(len(data[n:])) || length > uint64(maxProtobufFieldLen) {
 				break
 			}
 			data = data[n:]

@@ -48,6 +48,9 @@ func validateNote(note goanki.NewNote) error {
 		return fmt.Errorf("invalid note: at least one field must have content")
 	}
 	// Validate tags
+	if len(note.Tags) > 100 {
+		return fmt.Errorf("invalid note: too many tags (%d, max 100)", len(note.Tags))
+	}
 	for _, tag := range note.Tags {
 		if len(tag) > 100 {
 			return fmt.Errorf("invalid note: tag %q exceeds 100 characters", tag)
