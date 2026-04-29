@@ -426,16 +426,6 @@ func (s *Server) registerCollectionRoutes(mux *http.ServeMux, prefix string) {
 	mux.Handle("DELETE "+prefix+"/media/{filename...}", wrap(http.HandlerFunc(s.handleDeleteMedia)))
 }
 
-// maxBodySize is middleware that limits the request body size for all requests.
-func maxBodySize(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Body != nil {
-			r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
 // securityHeaders adds defensive HTTP headers to all responses.
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -560,7 +550,7 @@ func (s *Server) Handler() http.Handler {
 		s.registerCollectionRoutes(mux, "/api/v1")
 	}
 
-	return recoverPanic(securityHeaders(s.rateLimitMiddleware(s.requireAuth(maxBodySize(mux)))))
+	return recoverPanic(securityHeaders(s.rateLimitMiddleware(s.requireAuth(mux))))
 }
 
 // ListenAndServe starts the HTTP server on the configured port.
@@ -730,6 +720,7 @@ type answerRequest struct {
 
 // handleAnswer processes a card answer and updates its scheduling.
 func (s *Server) handleAnswer(col *collection.Collection, w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	var req answerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid request body")
@@ -772,6 +763,7 @@ type createDeckRequest struct {
 
 // handleCreateDeck creates a new deck.
 func (s *Server) handleCreateDeck(col *collection.Collection, w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	var req createDeckRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid request body")
@@ -800,6 +792,7 @@ type addNoteRequest struct {
 
 // handleAddNote creates a new note and its associated cards.
 func (s *Server) handleAddNote(col *collection.Collection, w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	var req addNoteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid request body")
@@ -1054,6 +1047,11 @@ func (s *Server) handleGetMedia(w http.ResponseWriter, r *http.Request) {
 		errorResponse(w, http.StatusBadRequest, "invalid filename")
 		return
 	}
+	// Check file exists before serving, so we can return a JSON error
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		errorResponse(w, http.StatusNotFound, "media file not found")
+		return
+	}
 	http.ServeFile(w, r, path)
 }
 
@@ -1083,7 +1081,12 @@ func (s *Server) handleUploadMedia(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = dst.Close() }()
 	if _, err := io.Copy(dst, r.Body); err != nil {
 		_ = os.Remove(path)
-		errorResponse(w, http.StatusInternalServerError, "write media file")
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			errorResponse(w, http.StatusRequestEntityTooLarge, "file too large")
+		} else {
+			errorResponse(w, http.StatusInternalServerError, "write media file")
+		}
 		return
 	}
 	jsonResponse(w, addCollection(r, map[string]interface{}{"status": "ok", "filename": filename}))
