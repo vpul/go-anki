@@ -321,6 +321,27 @@ func collectionNameFromContext(r *http.Request) string {
 	return v
 }
 
+// lockForCollection acquires either a per-collection lock (multi-collection mode)
+// or the global syncMu lock (single-collection mode) for the sync handler.
+// This allows concurrent sync operations on different collections while serializing
+// sync operations on the same collection or in single-collection mode.
+func (s *Server) lockForCollection(r *http.Request) {
+	if name := collectionNameFromContext(r); name != "" && s.registry != nil {
+		s.registry.LockCollection(name)
+	} else {
+		s.syncMu.Lock()
+	}
+}
+
+// unlockForCollection releases the lock acquired by lockForCollection.
+func (s *Server) unlockForCollection(r *http.Request) {
+	if name := collectionNameFromContext(r); name != "" && s.registry != nil {
+		s.registry.UnlockCollection(name)
+	} else {
+		s.syncMu.Unlock()
+	}
+}
+
 // addCollection adds a "collection" key to a response map when in multi-collection mode.
 func addCollection(r *http.Request, m map[string]interface{}) map[string]interface{} {
 	if name := collectionNameFromContext(r); name != "" {
@@ -802,8 +823,9 @@ func (s *Server) handleAddNote(col *collection.Collection, w http.ResponseWriter
 
 // handleSyncDownload performs a full download from AnkiWeb.
 func (s *Server) handleSyncDownload(w http.ResponseWriter, r *http.Request) {
-	s.syncMu.Lock()
-	defer s.syncMu.Unlock()
+	// Use per-collection lock in multi-collection mode for concurrent sync isolation
+	s.lockForCollection(r)
+	defer s.unlockForCollection(r)
 
 	// Block write handlers from opening the DB while sync replaces the file
 	s.writeMu.Lock()
@@ -858,8 +880,9 @@ func (s *Server) handleSyncDownload(w http.ResponseWriter, r *http.Request) {
 
 // handleSyncUpload performs a full upload to AnkiWeb.
 func (s *Server) handleSyncUpload(w http.ResponseWriter, r *http.Request) {
-	s.syncMu.Lock()
-	defer s.syncMu.Unlock()
+	// Use per-collection lock in multi-collection mode for concurrent sync isolation
+	s.lockForCollection(r)
+	defer s.unlockForCollection(r)
 
 	// Block write handlers from opening the DB while sync reads it
 	s.writeMu.Lock()
@@ -895,8 +918,9 @@ func (s *Server) handleSyncUpload(w http.ResponseWriter, r *http.Request) {
 
 // handleSyncDelta performs an incremental delta sync with AnkiWeb.
 func (s *Server) handleSyncDelta(w http.ResponseWriter, r *http.Request) {
-	s.syncMu.Lock()
-	defer s.syncMu.Unlock()
+	// Use per-collection lock in multi-collection mode for concurrent sync isolation
+	s.lockForCollection(r)
+	defer s.unlockForCollection(r)
 
 	// Block write handlers from opening the DB while sync operates
 	s.writeMu.Lock()

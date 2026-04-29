@@ -6,14 +6,18 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	stdsync "sync"
 )
 
 // validNameRE matches collection names containing only alphanumeric chars, hyphens, and underscores.
 var validNameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
 
 // CollectionRegistry maps collection names to .anki2 file paths.
+// It also provides per-collection mutexes for concurrent sync isolation.
 type CollectionRegistry struct {
 	collections map[string]string
+	locks       map[string]*stdsync.Mutex
+	mu          stdsync.Mutex // protects the locks map
 }
 
 // NewCollectionRegistry creates a CollectionRegistry from a name→path map.
@@ -41,7 +45,10 @@ func NewCollectionRegistry(collections map[string]string) (*CollectionRegistry, 
 	for k, v := range collections {
 		cp[k] = v
 	}
-	return &CollectionRegistry{collections: cp}, nil
+	return &CollectionRegistry{
+		collections: cp,
+		locks:       make(map[string]*stdsync.Mutex),
+	}, nil
 }
 
 // ParseCollections parses "name:path,name:path,..." into a name→path map.
@@ -88,4 +95,29 @@ func (r *CollectionRegistry) Names() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// LockCollection acquires the per-collection mutex for the given collection name.
+// In multi-collection mode, this allows concurrent sync operations on different
+// collections while serializing sync operations on the same collection.
+// The mutex is lazily created on first use.
+func (r *CollectionRegistry) LockCollection(name string) {
+	r.mu.Lock()
+	mtx, ok := r.locks[name]
+	if !ok {
+		mtx = &stdsync.Mutex{}
+		r.locks[name] = mtx
+	}
+	r.mu.Unlock()
+	mtx.Lock()
+}
+
+// UnlockCollection releases the per-collection mutex for the given collection name.
+func (r *CollectionRegistry) UnlockCollection(name string) {
+	r.mu.Lock()
+	mtx, ok := r.locks[name]
+	r.mu.Unlock()
+	if ok {
+		mtx.Unlock()
+	}
 }
