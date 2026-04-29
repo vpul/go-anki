@@ -171,6 +171,7 @@ func (c *Collection) getModelsV18() (map[int64]goanki.Model, error) {
 		}
 		if err := fieldRows.Err(); err != nil {
 			_ = fieldRows.Close()
+			log.Printf("warning: iterate fields for model %d: %v", mid, err)
 			continue
 		}
 		_ = fieldRows.Close()
@@ -202,6 +203,7 @@ func (c *Collection) getModelsV18() (map[int64]goanki.Model, error) {
 		}
 		if err := tmplRows.Err(); err != nil {
 			_ = tmplRows.Close()
+			log.Printf("warning: iterate templates for model %d: %v", mid, err)
 			continue
 		}
 		_ = tmplRows.Close()

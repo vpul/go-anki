@@ -197,9 +197,10 @@ type Server struct {
 	rateLimit     int // requests per minute per IP; 0 = disabled
 	closeCh       chan struct{}
 	limiter       *rateLimiter
-	syncMu        stdsync.Mutex   // Serializes concurrent sync operations (download/upload).
-	writeMu       stdsync.RWMutex // Protects dbPath from sync-vs-write races. Write handlers RLock, sync Lock.
-	httpServer    *http.Server    // Stored for graceful shutdown in Close()
+	syncMu        stdsync.Mutex       // Serializes concurrent sync operations (download/upload).
+	writeMu       stdsync.RWMutex     // Protects dbPath from sync-vs-write races. Write handlers RLock, sync Lock.
+	serverMu      stdsync.Mutex       // Protects httpServer field from concurrent access
+	httpServer    *http.Server        // Stored for graceful shutdown in Close()
 }
 
 // NewServer creates a new Server with the given database path and options.
@@ -244,7 +245,7 @@ func sanitizeErr(err error) string {
 	sqlitePatterns := []string{"SQL logic error", "database is locked", "disk I/O error"}
 
 	for _, kw := range sqlKeywords {
-		if strings.Contains(msg, kw) || strings.Contains(lower, kw) {
+		if strings.Contains(msg, kw) || strings.Contains(msg, strings.ToLower(kw)) {
 			return "internal error"
 		}
 	}
@@ -458,6 +459,7 @@ func (s *Server) ListenAndServe() error {
 		}()
 	}
 
+	s.serverMu.Lock()
 	s.httpServer = &http.Server{
 		Addr:         addr,
 		Handler:      s.Handler(),
@@ -465,6 +467,7 @@ func (s *Server) ListenAndServe() error {
 		WriteTimeout: s.writeTimeout,
 		IdleTimeout:  s.idleTimeout,
 	}
+	s.serverMu.Unlock()
 	err := s.httpServer.ListenAndServe()
 	// Signal cleanup goroutine to stop — runs on both success and failure paths
 	select {
@@ -488,10 +491,13 @@ func (s *Server) Close() error {
 		close(s.closeCh)
 	}
 	// Shut down the HTTP server
-	if s.httpServer != nil {
+	s.serverMu.Lock()
+	srv := s.httpServer
+	s.serverMu.Unlock()
+	if srv != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return s.httpServer.Shutdown(ctx)
+		return srv.Shutdown(ctx)
 	}
 	return nil
 }
