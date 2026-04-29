@@ -140,15 +140,15 @@ func TestMediaBeginWithMockServer(t *testing.T) {
 		switch r.URL.Path {
 		case "/hostKey", "/sync/hostKey":
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{"key": "mock-session-key"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"key": "mock-session-key"})
 		case "/msync/begin":
 			if k := r.URL.Query().Get("k"); k != "mock-session-key" {
 				w.WriteHeader(http.StatusForbidden)
-				json.NewEncoder(w).Encode(map[string]string{"err": "invalid key"})
+				_ = json.NewEncoder(w).Encode(map[string]string{"err": "invalid key"})
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"data": map[string]interface{}{
 					"sk":  "mock-media-key-xyz",
 					"usn": 123,
@@ -160,14 +160,14 @@ func TestMediaBeginWithMockServer(t *testing.T) {
 				return
 			}
 			var filenames []string
-			json.NewDecoder(r.Body).Decode(&filenames)
+			_ = json.NewDecoder(r.Body).Decode(&filenames)
 			w.Header().Set("Content-Type", "application/json")
 			// Return mock file data as base64-like strings
 			result := map[string]string{}
 			for _, f := range filenames {
 				result[f] = "bW9jay1pbWFnZS1kYXRh" // base64 "mock-image-data"
 			}
-			json.NewEncoder(w).Encode(result)
+			_ = json.NewEncoder(w).Encode(result)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}

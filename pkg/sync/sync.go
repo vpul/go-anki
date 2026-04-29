@@ -520,11 +520,11 @@ func renameWithCopy(src, dst string, perm os.FileMode) error {
 		return fmt.Errorf("create temp file: %w", err)
 	}
 	tmpPath := tmp.Name()
-	tmp.Close()
+	_ = tmp.Close()
 	// Clean up temp file on any error
 	defer func() {
 		if _, err := os.Stat(tmpPath); err == nil {
-			os.Remove(tmpPath)
+			_ = os.Remove(tmpPath)
 		}
 	}()
 	if err := copyFile(tmpPath, src, perm); err != nil {
