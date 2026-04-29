@@ -35,6 +35,14 @@ const (
 	maxTrackedIPs = 50000
 )
 
+// contextKey is the type for context keys used by this package.
+type contextKey string
+
+const (
+	dbPathContextKey         contextKey = "dbPath"
+	collectionNameContextKey contextKey = "collectionName"
+)
+
 // ServerOption is a functional option for configuring a Server.
 type ServerOption func(*Server)
 
@@ -93,6 +101,14 @@ func WithRateLimit(requestsPerMinute int) ServerOption {
 	}
 }
 
+// WithCollectionRegistry enables multi-collection mode. When set, all
+// collection-specific API routes are served under /api/v1/collections/{name}/.
+func WithCollectionRegistry(reg *CollectionRegistry) ServerOption {
+	return func(s *Server) {
+		s.registry = reg
+	}
+}
+
 // rateLimiter implements a per-IP sliding window rate limiter.
 type rateLimiter struct {
 	mu       stdsync.Mutex
@@ -103,7 +119,7 @@ type rateLimiter struct {
 
 // rateLimitResult indicates whether a request is allowed.
 type rateLimitResult struct {
-	allowed   bool
+	allowed    bool
 	retryAfter time.Duration // seconds until next request is allowed
 }
 
@@ -197,13 +213,18 @@ type Server struct {
 	rateLimit     int // requests per minute per IP; 0 = disabled
 	closeCh       chan struct{}
 	limiter       *rateLimiter
-	syncMu        stdsync.Mutex       // Serializes concurrent sync operations (download/upload).
-	writeMu       stdsync.RWMutex     // Protects dbPath from concurrent write handlers and sync. Both acquire exclusive Lock.
-	serverMu      stdsync.Mutex       // Protects httpServer field from concurrent access
-	httpServer    *http.Server        // Stored for graceful shutdown in Close()
+	// NOTE: syncMu and writeMu are server-wide locks. In multi-collection mode, a sync/write
+	// to collection-A blocks sync/writes to collection-B. This is a known simplification —
+	// per-collection locks could be added later for better throughput under concurrent access.
+	syncMu        stdsync.Mutex   // Serializes concurrent sync operations (download/upload).
+	writeMu       stdsync.RWMutex // Protects dbPath from concurrent write handlers and sync. Both acquire exclusive Lock.
+	serverMu      stdsync.Mutex   // Protects httpServer field from concurrent access
+	httpServer    *http.Server    // Stored for graceful shutdown in Close()
+	registry      *CollectionRegistry
 }
 
 // NewServer creates a new Server with the given database path and options.
+// In multi-collection mode, pass an empty dbPath and use WithCollectionRegistry.
 func NewServer(dbPath string, opts ...ServerOption) *Server {
 	s := &Server{
 		dbPath:       dbPath,
@@ -232,7 +253,7 @@ var (
 	pathPattern = regexp.MustCompile(`[/\\][\w._\-]+`)
 )
 
-//sanitizeErr sanitizes error messages for 500 status responses.
+// sanitizeErr sanitizes error messages for 500 status responses.
 // It removes internal details like file paths, SQL keywords, and
 // SQLite error patterns that should not be exposed to clients.
 func sanitizeErr(err error) string {
@@ -284,17 +305,43 @@ func jsonResponse(w http.ResponseWriter, v interface{}) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// dbPathFromContext returns the resolved DB path from request context,
+// falling back to s.dbPath in single-collection mode.
+func (s *Server) dbPathFromContext(r *http.Request) string {
+	if v, ok := r.Context().Value(dbPathContextKey).(string); ok && v != "" {
+		return v
+	}
+	return s.dbPath
+}
+
+// collectionNameFromContext returns the collection name stored in context
+// by the resolveCollection middleware (non-empty only in multi-collection mode).
+func collectionNameFromContext(r *http.Request) string {
+	v, _ := r.Context().Value(collectionNameContextKey).(string)
+	return v
+}
+
+// addCollection adds a "collection" key to a response map when in multi-collection mode.
+func addCollection(r *http.Request, m map[string]interface{}) map[string]interface{} {
+	if name := collectionNameFromContext(r); name != "" {
+		m["collection"] = name
+	}
+	return m
+}
+
 // withMode opens a collection with the given mode, calls fn, and closes it.
-// It handles DB locking errors and returns appropriate HTTP error responses.
+// In multi-collection mode the DB path is resolved from request context;
+// in single-collection mode it falls back to s.dbPath.
 // For ReadWrite mode, it acquires writeMu.Lock() to prevent concurrent write
 // handlers or sync operations from replacing the DB file while writes are in progress.
 func (s *Server) withMode(mode collection.OpenMode, fn func(col *collection.Collection, w http.ResponseWriter, r *http.Request)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		dbPath := s.dbPathFromContext(r)
 		if mode == collection.ReadWrite {
 			s.writeMu.Lock()
 			defer s.writeMu.Unlock()
 		}
-		col, err := collection.Open(s.dbPath, mode)
+		col, err := collection.Open(dbPath, mode)
 		if err != nil {
 			errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 			return
@@ -302,6 +349,46 @@ func (s *Server) withMode(mode collection.OpenMode, fn func(col *collection.Coll
 		defer func() { _ = col.Close() }()
 		fn(col, w, r)
 	}
+}
+
+// resolveCollection is middleware that resolves the {name} path value to a DB path
+// via the registry, storing both in the request context for downstream handlers.
+func (s *Server) resolveCollection(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		dbPath, err := s.registry.Resolve(name)
+		if err != nil {
+			errorResponse(w, http.StatusNotFound, "collection not found")
+			return
+		}
+		ctx := context.WithValue(r.Context(), dbPathContextKey, dbPath)
+		ctx = context.WithValue(ctx, collectionNameContextKey, name)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// registerCollectionRoutes registers all collection-specific API routes under prefix.
+// In multi-collection mode (registry != nil), each handler is wrapped with
+// resolveCollection middleware that validates the {name} path value and injects
+// the DB path into context.
+func (s *Server) registerCollectionRoutes(mux *http.ServeMux, prefix string) {
+	wrap := func(h http.Handler) http.Handler {
+		if s.registry != nil {
+			return s.resolveCollection(h)
+		}
+		return h
+	}
+
+	mux.Handle("GET "+prefix+"/version", wrap(http.HandlerFunc(s.handleVersion)))
+	mux.Handle("GET "+prefix+"/decks", wrap(s.withMode(collection.ReadOnly, s.handleGetDecks)))
+	mux.Handle("GET "+prefix+"/due-cards", wrap(s.withMode(collection.ReadOnly, s.handleGetDueCards)))
+	mux.Handle("GET "+prefix+"/stats", wrap(s.withMode(collection.ReadOnly, s.handleGetStats)))
+	mux.Handle("GET "+prefix+"/cards/{id}", wrap(s.withMode(collection.ReadOnly, s.handleGetCardByID)))
+	mux.Handle("POST "+prefix+"/answer", wrap(s.withMode(collection.ReadWrite, s.handleAnswer)))
+	mux.Handle("POST "+prefix+"/decks", wrap(s.withMode(collection.ReadWrite, s.handleCreateDeck)))
+	mux.Handle("POST "+prefix+"/notes", wrap(s.withMode(collection.ReadWrite, s.handleAddNote)))
+	mux.Handle("POST "+prefix+"/sync/download", wrap(http.HandlerFunc(s.handleSyncDownload)))
+	mux.Handle("POST "+prefix+"/sync/upload", wrap(http.HandlerFunc(s.handleSyncUpload)))
 }
 
 // maxBodySize is middleware that limits the request body size for all requests.
@@ -393,8 +480,24 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 
 // handleHealth returns the server health status.
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	// Quick DB connectivity check
-	if s.dbPath != "" {
+	if s.registry != nil {
+		// Multi-collection mode: check all collections, return 503 if any fail.
+		names := s.registry.Names()
+		for _, name := range names {
+			path, err := s.registry.Resolve(name)
+			if err != nil {
+				errorResponse(w, http.StatusServiceUnavailable, "database unavailable")
+				return
+			}
+			col, err := collection.Open(path, collection.ReadOnly)
+			if err != nil {
+				_ = col.Close()
+				errorResponse(w, http.StatusServiceUnavailable, "database unavailable")
+				return
+			}
+			_ = col.Close()
+		}
+	} else if s.dbPath != "" {
 		col, err := collection.Open(s.dbPath, collection.ReadOnly)
 		if err != nil {
 			errorResponse(w, http.StatusServiceUnavailable, "database unavailable")
@@ -406,27 +509,21 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 // Handler returns an http.Handler with all API routes registered.
+// In single-collection mode routes are at /api/v1/...
+// In multi-collection mode routes are at /api/v1/collections/{name}/...
+// plus GET /api/v1/collections to list available collections.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	// Health check endpoint (no auth required)
 	mux.HandleFunc("GET /health", s.handleHealth)
 
-	// Read endpoints
-	mux.HandleFunc("GET /api/v1/version", s.handleVersion)
-	mux.HandleFunc("GET /api/v1/decks", s.withMode(collection.ReadOnly, s.handleGetDecks))
-	mux.HandleFunc("GET /api/v1/due-cards", s.withMode(collection.ReadOnly, s.handleGetDueCards))
-	mux.HandleFunc("GET /api/v1/stats", s.withMode(collection.ReadOnly, s.handleGetStats))
-	mux.HandleFunc("GET /api/v1/cards/{id}", s.withMode(collection.ReadOnly, s.handleGetCardByID))
-
-	// Write endpoints
-	mux.HandleFunc("POST /api/v1/answer", s.withMode(collection.ReadWrite, s.handleAnswer))
-	mux.HandleFunc("POST /api/v1/decks", s.withMode(collection.ReadWrite, s.handleCreateDeck))
-	mux.HandleFunc("POST /api/v1/notes", s.withMode(collection.ReadWrite, s.handleAddNote))
-
-	// Sync endpoints
-	mux.HandleFunc("POST /api/v1/sync/download", s.handleSyncDownload)
-	mux.HandleFunc("POST /api/v1/sync/upload", s.handleSyncUpload)
+	if s.registry != nil {
+		s.registerCollectionRoutes(mux, "/api/v1/collections/{name}")
+		mux.HandleFunc("GET /api/v1/collections", s.handleListCollections)
+	} else {
+		s.registerCollectionRoutes(mux, "/api/v1")
+	}
 
 	return recoverPanic(securityHeaders(s.rateLimitMiddleware(s.requireAuth(maxBodySize(mux)))))
 }
@@ -506,12 +603,19 @@ func (s *Server) Close() error {
 }
 
 // handleVersion returns the server version.
-func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
-	jsonResponse(w, map[string]string{"version": "go-anki/1.0.0"})
+func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
+	resp := map[string]interface{}{"version": "go-anki/1.0.0"}
+	jsonResponse(w, addCollection(r, resp))
+}
+
+// handleListCollections returns the names of all registered collections.
+// Only available in multi-collection mode.
+func (s *Server) handleListCollections(w http.ResponseWriter, _ *http.Request) {
+	jsonResponse(w, map[string]interface{}{"collections": s.registry.Names()})
 }
 
 // handleGetDecks returns all decks in the collection.
-func (s *Server) handleGetDecks(col *collection.Collection, w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleGetDecks(col *collection.Collection, w http.ResponseWriter, r *http.Request) {
 	decks, err := col.GetDecks()
 	if err != nil {
 		errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
@@ -522,7 +626,7 @@ func (s *Server) handleGetDecks(col *collection.Collection, w http.ResponseWrite
 	for _, d := range decks {
 		deckList = append(deckList, d)
 	}
-	jsonResponse(w, map[string]interface{}{"decks": deckList})
+	jsonResponse(w, addCollection(r, map[string]interface{}{"decks": deckList}))
 }
 
 // handleGetDueCards returns cards that are due for review.
@@ -549,17 +653,17 @@ func (s *Server) handleGetDueCards(col *collection.Collection, w http.ResponseWr
 		errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 		return
 	}
-	jsonResponse(w, map[string]interface{}{"cards": cards})
+	jsonResponse(w, addCollection(r, map[string]interface{}{"cards": cards}))
 }
 
 // handleGetStats returns collection statistics.
-func (s *Server) handleGetStats(col *collection.Collection, w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleGetStats(col *collection.Collection, w http.ResponseWriter, r *http.Request) {
 	stats, err := col.GetStats()
 	if err != nil {
 		errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 		return
 	}
-	jsonResponse(w, map[string]interface{}{"stats": stats})
+	jsonResponse(w, addCollection(r, map[string]interface{}{"stats": stats}))
 }
 
 // handleGetCardByID returns a single card by its ID.
@@ -580,7 +684,7 @@ func (s *Server) handleGetCardByID(col *collection.Collection, w http.ResponseWr
 		}
 		return
 	}
-	jsonResponse(w, map[string]interface{}{"card": card})
+	jsonResponse(w, addCollection(r, map[string]interface{}{"card": card}))
 }
 
 // answerRequest is the request body for the answer endpoint.
@@ -620,10 +724,10 @@ func (s *Server) handleAnswer(col *collection.Collection, w http.ResponseWriter,
 		}
 		return
 	}
-	jsonResponse(w, map[string]interface{}{
+	jsonResponse(w, addCollection(r, map[string]interface{}{
 		"card":   answer.Card,
 		"review": answer.Review,
-	})
+	}))
 }
 
 // createDeckRequest is the request body for the create deck endpoint.
@@ -648,7 +752,7 @@ func (s *Server) handleCreateDeck(col *collection.Collection, w http.ResponseWri
 		errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 		return
 	}
-	jsonResponse(w, map[string]interface{}{"deck_id": deckID})
+	jsonResponse(w, addCollection(r, map[string]interface{}{"deck_id": deckID}))
 }
 
 // addNoteRequest is the request body for the add note endpoint.
@@ -692,7 +796,7 @@ func (s *Server) handleAddNote(col *collection.Collection, w http.ResponseWriter
 		errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 		return
 	}
-	jsonResponse(w, map[string]interface{}{"note_id": noteID})
+	jsonResponse(w, addCollection(r, map[string]interface{}{"note_id": noteID}))
 }
 
 // handleSyncDownload performs a full download from AnkiWeb.
@@ -709,6 +813,8 @@ func (s *Server) handleSyncDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	dbPath := s.dbPathFromContext(r)
+
 	client, err := sync.NewClient(*s.syncConfig)
 	if err != nil {
 		log.Printf("create sync client: %v", err)
@@ -722,7 +828,7 @@ func (s *Server) handleSyncDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err = client.FullDownload(ctx, s.dbPath, s.mediaDir)
+	_, err = client.FullDownload(ctx, dbPath, s.mediaDir)
 	if err != nil {
 		errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 		return
@@ -730,7 +836,7 @@ func (s *Server) handleSyncDownload(w http.ResponseWriter, r *http.Request) {
 
 	// Count cards in the downloaded collection
 	cardCount := 0
-	col, err := collection.Open(s.dbPath, collection.ReadOnly)
+	col, err := collection.Open(dbPath, collection.ReadOnly)
 	if err != nil {
 		log.Printf("warning: open collection after download: %v", err)
 	} else {
@@ -743,10 +849,10 @@ func (s *Server) handleSyncDownload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	jsonResponse(w, map[string]interface{}{
+	jsonResponse(w, addCollection(r, map[string]interface{}{
 		"status": "ok",
 		"cards":  cardCount,
-	})
+	}))
 }
 
 // handleSyncUpload performs a full upload to AnkiWeb.
@@ -763,6 +869,8 @@ func (s *Server) handleSyncUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	dbPath := s.dbPathFromContext(r)
+
 	client, err := sync.NewClient(*s.syncConfig)
 	if err != nil {
 		log.Printf("create sync client: %v", err)
@@ -776,10 +884,10 @@ func (s *Server) handleSyncUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := client.FullUpload(ctx, s.dbPath, s.mediaDir); err != nil {
+	if err := client.FullUpload(ctx, dbPath, s.mediaDir); err != nil {
 		errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 		return
 	}
 
-	jsonResponse(w, map[string]string{"status": "ok"})
+	jsonResponse(w, addCollection(r, map[string]interface{}{"status": "ok"}))
 }
