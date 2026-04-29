@@ -96,7 +96,6 @@ func ExportColpkg(opts ExportColpkgOptions) error {
 	defer func() { _ = outFile.Close() }()
 
 	zipWriter := zip.NewWriter(outFile)
-	defer func() { _ = zipWriter.Close() }()
 
 	// Add collection.anki21b (zstd-compressed)
 	if err := addFileToZip(zipWriter, "collection.anki21b", compressedDB); err != nil {

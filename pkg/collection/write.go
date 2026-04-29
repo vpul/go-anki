@@ -85,7 +85,10 @@ func (c *Collection) AnswerCard(cardID int64, rating goanki.Rating, scheduler Sc
 	// it doesn't have access to the collection's creation timestamp (crt).
 	// We must compute the proper day offset: days_since_crt + interval.
 	if answer.Card.Type == goanki.CardTypeReview && answer.Card.Due == -1 {
-		dayOffset := dayOffsetSinceCreation(c)
+		dayOffset, err := dayOffsetSinceCreation(c)
+		if err != nil {
+			return nil, fmt.Errorf("compute day offset: %w", err)
+		}
 		answer.Card.Due = dayOffset + int64(answer.Card.IVL)
 	}
 
@@ -206,7 +209,11 @@ func (c *Collection) createDeckUnlocked(name string) (int64, error) {
 	}
 
 	now := time.Now().Unix()
-	id := now*1000 + int64(randInt(1000)) // Anki-style: timestamp_ms + random offset
+	r, err := randInt(1000) // Anki-style: timestamp_ms + random offset
+	if err != nil {
+		return 0, fmt.Errorf("generate deck ID: %w", err)
+	}
+	id := now*1000 + int64(r)
 
 	if c.isV18Plus() {
 		// v18+: Insert into separate decks table with protobuf blobs
@@ -307,7 +314,11 @@ func (c *Collection) AddNote(input goanki.NewNote) (int64, error) {
 	defer func() { _ = tx.Rollback() }()
 
 	now := time.Now().Unix()
-	noteID := now*1000 + int64(randInt(1000))
+	noteRand, err := randInt(1000)
+	if err != nil {
+		return 0, fmt.Errorf("generate note ID: %w", err)
+	}
+	noteID := now*1000 + int64(noteRand)
 
 	// Build fields string (separated by \x1f)
 	fieldValues := make([]string, len(model.Fields))
@@ -333,7 +344,10 @@ func (c *Collection) AddNote(input goanki.NewNote) (int64, error) {
 	}
 
 	// Insert note
-	guid := generateGUID()
+	guid, err := generateGUID()
+	if err != nil {
+		return 0, fmt.Errorf("generate GUID: %w", err)
+	}
 	if c.isV18Plus() {
 		// In v18+, sfld and csum are INTEGER columns. We store the CRC32 checksum
 		// as an integer (which is what Anki does in v18+).
@@ -363,14 +377,22 @@ func (c *Collection) AddNote(input goanki.NewNote) (int64, error) {
 		// Two notes created in the same millisecond where |noteID_A - noteID_B| < 1000
 		// could still produce overlapping card ID ranges — extremely unlikely in practice
 		// since Anki usage rarely creates multiple notes in the same millisecond.
-		cardID := noteID + int64(tmpl.ORD)*1000 + int64(randInt(1000))
+		cardRand, err := randInt(1000)
+		if err != nil {
+			return 0, fmt.Errorf("generate card ID: %w", err)
+		}
+		cardID := noteID + int64(tmpl.ORD)*1000 + int64(cardRand)
+		dayOffset, err := dayOffsetSinceCreation(c)
+		if err != nil {
+			return 0, fmt.Errorf("compute day offset: %w", err)
+		}
 		_, err = tx.Exec(`
 			INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl,
 			                    factor, reps, lapses, left, odue, odid, flags, data)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			cardID, noteID, deckID, tmpl.ORD, now, -1,
 			int(goanki.CardTypeNew), int(goanki.QueueNew),
-			dayOffsetSinceCreation(c), 0, 0, 0, 0, 0, 0, 0, 0, "",
+			dayOffset, 0, 0, 0, 0, 0, 0, 0, 0, "",
 		)
 		if err != nil {
 			return 0, fmt.Errorf("insert card: %w", err)
@@ -386,36 +408,36 @@ func (c *Collection) AddNote(input goanki.NewNote) (int64, error) {
 }
 
 // dayOffsetSinceCreation returns the number of days since the collection was created.
-func dayOffsetSinceCreation(c *Collection) int64 {
+func dayOffsetSinceCreation(c *Collection) (int64, error) {
 	var crt int64
 	if err := c.db.QueryRow("SELECT crt FROM col").Scan(&crt); err != nil {
-		log.Printf("warning: failed to query collection creation time: %v", err)
+		return 0, fmt.Errorf("failed to query collection creation time: %w", err)
 	}
 	if crt == 0 {
-		return time.Now().Unix() / 86400
+		return time.Now().Unix() / 86400, nil
 	}
-	return (time.Now().Unix() - crt) / 86400
+	return (time.Now().Unix() - crt) / 86400, nil
 }
 
 // generateGUID creates a cryptographically random 10-character GUID for a note.
 // Uses rejection sampling to avoid modulo bias (since 256 is not evenly
 // divisible by 62, we reject bytes >= 248 and only accept bytes in [0, 248)
 // which gives uniform distribution over the 62-character alphabet).
-func generateGUID() string {
+func generateGUID() (string, error) {
 	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	const maxByte = byte(248) // 62 * 4 = 248, giving uniform distribution
 	result := make([]byte, 10)
 	for i := 0; i < len(result); {
 		b := make([]byte, 1)
 		if _, err := rand.Read(b); err != nil {
-			panic(fmt.Sprintf("crypto/rand.Read failed: %v", err))
+			return "", fmt.Errorf("crypto/rand.Read failed: %w", err)
 		}
 		if b[0] < maxByte {
 			result[i] = chars[b[0]%byte(len(chars))]
 			i++
 		}
 	}
-	return string(result)
+	return string(result), nil
 }
 
 // fieldChecksum computes the Anki field checksum.
@@ -430,9 +452,9 @@ func fieldChecksum(field string) string {
 // randInt generates a cryptographically random non-negative integer in [0, max).
 // Uses rejection sampling to avoid modulo bias, matching the approach used in
 // generateGUID.
-func randInt(max int) int {
+func randInt(max int) (int, error) {
 	if max <= 0 {
-		return 0
+		return 0, nil
 	}
 	// Compute the largest multiple of max that fits in uint32.
 	// Any random value >= threshold would create bias when reduced modulo max,
@@ -442,11 +464,11 @@ func randInt(max int) int {
 	b := make([]byte, 4)
 	for {
 		if _, err := rand.Read(b); err != nil {
-			panic(fmt.Sprintf("crypto/rand.Read failed: %v", err))
+			return 0, fmt.Errorf("crypto/rand.Read failed: %w", err)
 		}
 		v := binary.BigEndian.Uint32(b)
 		if v < threshold {
-			return int(v % uint32(max))
+			return int(v % uint32(max)), nil
 		}
 	}
 }

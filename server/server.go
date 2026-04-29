@@ -4,6 +4,7 @@
 package server
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -145,13 +146,28 @@ func (rl *rateLimiter) allow(ip string) rateLimitResult {
 
 // cleanup removes expired entries from the rate limiter.
 func (rl *rateLimiter) cleanup() {
+	// Snapshot keys under the lock, then iterate outside it to minimize lock contention.
 	rl.mu.Lock()
-	defer rl.mu.Unlock()
+	keys := make([]string, 0, len(rl.requests))
+	for ip := range rl.requests {
+		keys = append(keys, ip)
+	}
+	rl.mu.Unlock()
+
+	if len(keys) == 0 {
+		return
+	}
 
 	now := time.Now()
 	windowStart := now.Add(-time.Minute)
 
-	for ip, timestamps := range rl.requests {
+	for _, ip := range keys {
+		rl.mu.Lock()
+		timestamps, exists := rl.requests[ip]
+		if !exists {
+			rl.mu.Unlock()
+			continue
+		}
 		valid := timestamps[:0]
 		for _, t := range timestamps {
 			if t.After(windowStart) {
@@ -163,6 +179,7 @@ func (rl *rateLimiter) cleanup() {
 		} else {
 			rl.requests[ip] = valid
 		}
+		rl.mu.Unlock()
 	}
 }
 
@@ -180,10 +197,9 @@ type Server struct {
 	rateLimit     int // requests per minute per IP; 0 = disabled
 	closeCh       chan struct{}
 	limiter       *rateLimiter
-	syncMu        stdsync.Mutex // Serializes concurrent sync operations (download/upload).
-	// Note: This does not protect against sync-vs-write races.
-	// Write handlers (handleAnswer, handleAddNote, etc.) go through
-	// withMode and acquire their own DB-level locks via SQLite WAL.
+	syncMu        stdsync.Mutex   // Serializes concurrent sync operations (download/upload).
+	writeMu       stdsync.RWMutex // Protects dbPath from sync-vs-write races. Write handlers RLock, sync Lock.
+	httpServer    *http.Server    // Stored for graceful shutdown in Close()
 }
 
 // NewServer creates a new Server with the given database path and options.
@@ -218,19 +234,17 @@ func sanitizeErr(err error) string {
 	msg := err.Error()
 	lower := strings.ToLower(msg)
 
+	// Known sentinel errors — safe to surface
+	if errors.Is(err, collection.ErrNotFound) {
+		return "not found"
+	}
+
 	// Patterns that indicate internal details should be hidden entirely.
-	// Checked BEFORE the "not found" shortcut so that errors like
-	// "SELECT * FROM cards WHERE id=5: record not found" are sanitized
-	// as "internal error" rather than leaking SQL.
-	pathPattern := regexp.MustCompile(`[/\\][\w._-]+`)
-	sqlKeywords := []string{"SELECT ", "INSERT ", "UPDATE ", "DELETE ", "WHERE ", "select ", "insert ", "update ", "delete ", "where "}
+	sqlKeywords := []string{"SELECT ", "INSERT ", "UPDATE ", "DELETE ", "WHERE "}
 	sqlitePatterns := []string{"SQL logic error", "database is locked", "disk I/O error"}
 
-	if pathPattern.MatchString(msg) {
-		return "internal error"
-	}
 	for _, kw := range sqlKeywords {
-		if strings.Contains(msg, kw) {
+		if strings.Contains(msg, kw) || strings.Contains(lower, kw) {
 			return "internal error"
 		}
 	}
@@ -240,13 +254,16 @@ func sanitizeErr(err error) string {
 		}
 	}
 
-	// "not found" errors are safe to surface only after checking for SQL/path leaks
-	if strings.Contains(lower, "not found") {
-		return "not found"
-	}
+	// Strip path-like content instead of blanket-redacting the whole message.
+	// This preserves meaningful error text while removing internal paths like
+	// "/home/user/collection.anki2".
+	pathPattern := regexp.MustCompile(`[/\\][\w._\-]+`)
+	sanitized := pathPattern.ReplaceAllString(msg, "")
+	sanitized = strings.TrimSpace(sanitized)
 
-	// For other errors, strip any path-like content but return the rest
-	sanitized := pathPattern.ReplaceAllString(msg, "[redacted]")
+	if sanitized == "" {
+		return "internal error"
+	}
 	return sanitized
 }
 
@@ -265,8 +282,14 @@ func jsonResponse(w http.ResponseWriter, v interface{}) {
 
 // withMode opens a collection with the given mode, calls fn, and closes it.
 // It handles DB locking errors and returns appropriate HTTP error responses.
+// For ReadWrite mode, it acquires writeMu.RLock() to prevent concurrent sync
+// operations from replacing the DB file while writes are in progress.
 func (s *Server) withMode(mode collection.OpenMode, fn func(col *collection.Collection, w http.ResponseWriter, r *http.Request)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if mode == collection.ReadWrite {
+			s.writeMu.RLock()
+			defer s.writeMu.RUnlock()
+		}
 		col, err := collection.Open(s.dbPath, mode)
 		if err != nil {
 			errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
@@ -366,6 +389,15 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 
 // handleHealth returns the server health status.
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	// Quick DB connectivity check
+	if s.dbPath != "" {
+		col, err := collection.Open(s.dbPath, collection.ReadOnly)
+		if err != nil {
+			errorResponse(w, http.StatusServiceUnavailable, "database unavailable")
+			return
+		}
+		_ = col.Close()
+	}
 	jsonResponse(w, map[string]string{"status": "ok"})
 }
 
@@ -408,7 +440,9 @@ func (s *Server) ListenAndServe() error {
 
 	log.Printf("go-anki server listening on %s", addr)
 
-	// Start rate limiter cleanup goroutine if rate limiting is enabled
+	// Start rate limiter cleanup goroutine if rate limiting is enabled.
+	// The goroutine stops when closeCh is signaled, which happens on
+	// both graceful shutdown (Close) and startup failure (port in use).
 	if s.limiter != nil {
 		go func() {
 			ticker := time.NewTicker(5 * time.Minute)
@@ -424,25 +458,40 @@ func (s *Server) ListenAndServe() error {
 		}()
 	}
 
-	srv := &http.Server{
+	s.httpServer = &http.Server{
 		Addr:         addr,
 		Handler:      s.Handler(),
 		ReadTimeout:  s.readTimeout,
 		WriteTimeout: s.writeTimeout,
 		IdleTimeout:  s.idleTimeout,
 	}
-	return srv.ListenAndServe()
+	err := s.httpServer.ListenAndServe()
+	// Signal cleanup goroutine to stop — runs on both success and failure paths
+	select {
+	case <-s.closeCh:
+	default:
+		close(s.closeCh)
+	}
+	if err == http.ErrServerClosed {
+		return nil // Shutdown initiated by Close(), not an error
+	}
+	return err
 }
 
-// Close shuts down the server gracefully, stopping the rate limiter cleanup goroutine.
-// It signals the closeCh to stop background goroutines and then closes the HTTP server.
+// Close shuts down the server gracefully, stopping the rate limiter cleanup goroutine
+// and shutting down the HTTP server with a 5-second timeout.
 func (s *Server) Close() error {
 	// Signal background goroutines to stop
 	select {
 	case <-s.closeCh:
-		// Already closed
 	default:
 		close(s.closeCh)
+	}
+	// Shut down the HTTP server
+	if s.httpServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return s.httpServer.Shutdown(ctx)
 	}
 	return nil
 }
@@ -642,6 +691,10 @@ func (s *Server) handleSyncDownload(w http.ResponseWriter, r *http.Request) {
 	s.syncMu.Lock()
 	defer s.syncMu.Unlock()
 
+	// Block write handlers from opening the DB while sync replaces the file
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	if s.syncConfig == nil {
 		errorResponse(w, http.StatusServiceUnavailable, "sync not configured: set SyncConfig")
 		return
@@ -691,6 +744,10 @@ func (s *Server) handleSyncDownload(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSyncUpload(w http.ResponseWriter, r *http.Request) {
 	s.syncMu.Lock()
 	defer s.syncMu.Unlock()
+
+	// Block write handlers from opening the DB while sync reads it
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
 	if s.syncConfig == nil {
 		errorResponse(w, http.StatusServiceUnavailable, "sync not configured: set SyncConfig")
