@@ -41,6 +41,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	goanki "github.com/vpul/go-anki/pkg/apkg"
 	goankitypes "github.com/vpul/go-anki/pkg/types"
 )
@@ -48,6 +49,9 @@ import (
 const (
 	// maxDownloadSize is the maximum size (500MB) of a response body from AnkiWeb.
 	maxDownloadSize int64 = 500 * 1024 * 1024
+
+	// maxUploadSize is the maximum size (500MB) of a database file to upload.
+	maxUploadSize int64 = 500 * 1024 * 1024
 
 	// downloadTimeout is the overall timeout for download operations.
 	downloadTimeout = 5 * time.Minute
@@ -564,39 +568,16 @@ func moveMediaFiles(srcDir, dstDir string) int {
 }
 
 // FullUpload uploads the full collection to AnkiWeb.
-// It creates a .colpkg from the local collection database and media directory,
-// then uploads it to AnkiWeb. The file is streamed from disk using io.Pipe
-// to avoid loading the entire .colpkg into memory.
+// The database is streamed through zstd compression and into the HTTP request
+// body via io.Pipe, avoiding loading the entire collection into memory.
 //
 // Parameters:
 //   - ctx: context for cancellation
 //   - dbPath: path to the local collection.anki2 database
-//   - mediaDir: directory containing media files (can be empty string for no media)
-func (c *Client) FullUpload(ctx context.Context, dbPath string, mediaDir string) error {
+//   - mediaDir: unused; kept for API compatibility (media sync uses a separate endpoint)
+func (c *Client) FullUpload(ctx context.Context, dbPath string, _ string) error {
 	if c.sessionKey == "" {
 		return fmt.Errorf("not authenticated; call Authenticate() first")
-	}
-
-	// Create temporary .colpkg file
-	tmpDir, err := os.MkdirTemp("", "anki-sync-upload-*")
-	if err != nil {
-		return fmt.Errorf("create temp dir: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(tmpDir) }()
-
-	colpkgPath := filepath.Join(tmpDir, "upload.colpkg")
-
-	// Build export options
-	opts := goanki.ExportColpkgOptions{
-		SourceDB:   dbPath,
-		OutputPath: colpkgPath,
-	}
-	if mediaDir != "" {
-		opts.MediaDir = mediaDir
-	}
-
-	if err := goanki.ExportColpkg(opts); err != nil {
-		return fmt.Errorf("export colpkg: %w", err)
 	}
 
 	// Build the upload URL
@@ -608,29 +589,52 @@ func (c *Client) FullUpload(ctx context.Context, dbPath string, mediaDir string)
 		return fmt.Errorf("build upload URL: %w", err)
 	}
 
-	// Open the colpkg file for streaming upload
-	colpkgFile, err := os.Open(colpkgPath)
+	// Open the source database file
+	dbFile, err := os.Open(dbPath)
 	if err != nil {
-		return fmt.Errorf("open colpkg file: %w", err)
+		return fmt.Errorf("open database file: %w", err)
 	}
-	defer func() { _ = colpkgFile.Close() }()
+	defer func() { _ = dbFile.Close() }()
 
-	// Stream the multipart form using a pipe to avoid reading the entire file into memory
+	// Check file size before streaming to catch oversized DBs early
+	dbInfo, err := dbFile.Stat()
+	if err != nil {
+		return fmt.Errorf("stat database file: %w", err)
+	}
+	if dbInfo.Size() > maxUploadSize {
+		return fmt.Errorf("database file size %d exceeds maximum upload size of %d bytes", dbInfo.Size(), maxUploadSize)
+	}
+
+	// Stream the DB through zstd compression into the HTTP request body via a pipe
 	pr, pw := io.Pipe()
 	formWriter := multipart.NewWriter(pw)
 
 	go func() {
 		defer func() { _ = pw.Close() }()
 
-		part, err := formWriter.CreateFormFile("file", filepath.Base(colpkgPath))
+		part, err := formWriter.CreateFormFile("data", "collection.anki2")
 		if err != nil {
-			pw.CloseWithError(fmt.Errorf("create form file field: %w", err))
+			pw.CloseWithError(fmt.Errorf("create form data field: %w", err))
 			return
 		}
-		if _, err := io.Copy(part, colpkgFile); err != nil {
-			pw.CloseWithError(fmt.Errorf("copy colpkg to form: %w", err))
+
+		zstdWriter, err := zstd.NewWriter(part)
+		if err != nil {
+			pw.CloseWithError(fmt.Errorf("create zstd writer: %w", err))
 			return
 		}
+
+		if _, err := io.Copy(zstdWriter, io.LimitReader(dbFile, maxUploadSize+1)); err != nil {
+			_ = zstdWriter.Close()
+			pw.CloseWithError(fmt.Errorf("compress database: %w", err))
+			return
+		}
+
+		if err := zstdWriter.Close(); err != nil {
+			pw.CloseWithError(fmt.Errorf("close zstd writer: %w", err))
+			return
+		}
+
 		if err := formWriter.Close(); err != nil {
 			pw.CloseWithError(fmt.Errorf("close form writer: %w", err))
 			return

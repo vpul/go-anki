@@ -551,12 +551,14 @@ func TestFullUploadSuccess(t *testing.T) {
 	sourceDB := filepath.Join(tmpDir, "collection.anki2")
 	mediaDir := filepath.Join(tmpDir, "media")
 
+	dbContent := []byte("SQLite format 3\x00" + string(make([]byte, 100)))
+
 	// Create a minimal SQLite-like file for the upload
-	if err := os.WriteFile(sourceDB, []byte("SQLite format 3\x00"+string(make([]byte, 100))), 0644); err != nil {
+	if err := os.WriteFile(sourceDB, dbContent, 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	// Create media directory with a test file
+	// Create media directory with a test file (should be ignored by streaming upload)
 	if err := os.MkdirAll(mediaDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -571,25 +573,42 @@ func TestFullUploadSuccess(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"key":"upload-test-key"}`))
 		default:
-			// Verify upload query parameter
+			// Verify upload query parameters
 			if r.URL.Query().Get("upload") != "1" {
 				t.Errorf("expected upload=1 query parameter, got %v", r.URL.Query())
 			}
 			if r.URL.Query().Get("k") == "" {
 				t.Error("expected session key in query parameters")
 			}
-			// Verify multipart form data
-			contentType := r.Header.Get("Content-Type")
-			if contentType == "" {
-				t.Error("missing Content-Type header")
+			// Parse multipart form to verify "data" field with zstd content
+			if err := r.ParseMultipartForm(10 << 20); err != nil {
+				t.Errorf("parse multipart form: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
 			}
-			// Read the body to ensure it's valid
-			body, err := io.ReadAll(r.Body)
+			f, _, err := r.FormFile("data")
 			if err != nil {
-				t.Errorf("read body: %v", err)
+				t.Errorf("read 'data' field from multipart form: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
 			}
-			if len(body) == 0 {
-				t.Error("upload body is empty")
+			defer func() { _ = f.Close() }()
+			// Decompress and verify the content matches the original DB
+			dec, err := zstd.NewReader(f)
+			if err != nil {
+				t.Errorf("create zstd reader: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			defer dec.Close()
+			decompressed, err := io.ReadAll(dec)
+			if err != nil {
+				t.Errorf("decompress upload body: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if !bytes.Equal(decompressed, dbContent) {
+				t.Errorf("decompressed content mismatch: got %d bytes, want %d bytes", len(decompressed), len(dbContent))
 			}
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(""))
