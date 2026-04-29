@@ -611,7 +611,6 @@ func TestFullUploadSuccess(t *testing.T) {
 				t.Errorf("decompressed content mismatch: got %d bytes, want %d bytes", len(decompressed), len(dbContent))
 			}
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(""))
 		}
 	}))
 	defer server.Close()
@@ -653,7 +652,6 @@ func TestFullUploadWithEmptyMediaDir(t *testing.T) {
 			// Accept the upload
 			_, _ = io.ReadAll(r.Body)
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(""))
 		}
 	}))
 	defer server.Close()

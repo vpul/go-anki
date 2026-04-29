@@ -610,35 +610,34 @@ func (c *Client) FullUpload(ctx context.Context, dbPath string, _ string) error 
 	formWriter := multipart.NewWriter(pw)
 
 	go func() {
-		defer func() { _ = pw.Close() }()
+		streamErr := func() error {
+			part, err := formWriter.CreateFormFile("data", "collection.anki2")
+			if err != nil {
+				return fmt.Errorf("create form data field: %w", err)
+			}
 
-		part, err := formWriter.CreateFormFile("data", "collection.anki2")
-		if err != nil {
-			pw.CloseWithError(fmt.Errorf("create form data field: %w", err))
-			return
-		}
+			zstdWriter, err := zstd.NewWriter(part)
+			if err != nil {
+				return fmt.Errorf("create zstd writer: %w", err)
+			}
 
-		zstdWriter, err := zstd.NewWriter(part)
-		if err != nil {
-			pw.CloseWithError(fmt.Errorf("create zstd writer: %w", err))
-			return
-		}
+			// Use maxUploadSize (without +1) since we already pre-checked file size with Stat()
+			if _, err := io.Copy(zstdWriter, io.LimitReader(dbFile, maxUploadSize)); err != nil {
+				_ = zstdWriter.Close()
+				return fmt.Errorf("compress database: %w", err)
+			}
 
-		if _, err := io.Copy(zstdWriter, io.LimitReader(dbFile, maxUploadSize+1)); err != nil {
-			_ = zstdWriter.Close()
-			pw.CloseWithError(fmt.Errorf("compress database: %w", err))
-			return
-		}
+			if err := zstdWriter.Close(); err != nil {
+				return fmt.Errorf("close zstd writer: %w", err)
+			}
 
-		if err := zstdWriter.Close(); err != nil {
-			pw.CloseWithError(fmt.Errorf("close zstd writer: %w", err))
-			return
-		}
-
-		if err := formWriter.Close(); err != nil {
-			pw.CloseWithError(fmt.Errorf("close form writer: %w", err))
-			return
-		}
+			if err := formWriter.Close(); err != nil {
+				return fmt.Errorf("close form writer: %w", err)
+			}
+			return nil
+		}()
+		// nil → io.EOF (clean close); non-nil → root cause propagates to the HTTP client
+		pw.CloseWithError(streamErr)
 	}()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, syncURL, pr)
