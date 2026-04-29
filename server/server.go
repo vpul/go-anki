@@ -213,10 +213,12 @@ type Server struct {
 	rateLimit     int // requests per minute per IP; 0 = disabled
 	closeCh       chan struct{}
 	limiter       *rateLimiter
-	// NOTE: syncMu and writeMu are server-wide locks. In multi-collection mode, a sync/write
-	// to collection-A blocks sync/writes to collection-B. This is a known simplification —
-	// per-collection locks could be added later for better throughput under concurrent access.
-	syncMu        stdsync.Mutex   // Serializes concurrent sync operations (download/upload).
+	// syncMu serializes sync operations in single-collection mode only.
+	// In multi-collection mode, per-collection locks in CollectionRegistry handle
+	// sync serialization per collection, allowing concurrent syncs on different collections.
+	// writeMu remains server-wide — it protects dbPath from concurrent write handlers
+	// regardless of collection mode.
+	syncMu        stdsync.Mutex   // Serializes sync operations (single-collection mode only).
 	writeMu       stdsync.RWMutex // Protects dbPath from concurrent write handlers and sync. Both acquire exclusive Lock.
 	serverMu      stdsync.Mutex   // Protects httpServer field from concurrent access
 	httpServer    *http.Server    // Stored for graceful shutdown in Close()

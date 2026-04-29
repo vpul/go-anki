@@ -14,14 +14,15 @@ var validNameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
 
 // CollectionRegistry maps collection names to .anki2 file paths.
 // It also provides per-collection mutexes for concurrent sync isolation.
+// Each registered collection gets its own lock, allocated at construction time.
 type CollectionRegistry struct {
 	collections map[string]string
 	locks       map[string]*stdsync.Mutex
-	mu          stdsync.Mutex // protects the locks map
 }
 
 // NewCollectionRegistry creates a CollectionRegistry from a name→path map.
 // All paths are validated to exist and be non-empty at construction time.
+// Per-collection mutexes are pre-allocated for every known name.
 func NewCollectionRegistry(collections map[string]string) (*CollectionRegistry, error) {
 	if len(collections) == 0 {
 		return nil, fmt.Errorf("collections map cannot be empty")
@@ -42,12 +43,14 @@ func NewCollectionRegistry(collections map[string]string) (*CollectionRegistry, 
 		}
 	}
 	cp := make(map[string]string, len(collections))
+	locks := make(map[string]*stdsync.Mutex, len(collections))
 	for k, v := range collections {
 		cp[k] = v
+		locks[k] = &stdsync.Mutex{}
 	}
 	return &CollectionRegistry{
 		collections: cp,
-		locks:       make(map[string]*stdsync.Mutex),
+		locks:       locks,
 	}, nil
 }
 
@@ -100,24 +103,13 @@ func (r *CollectionRegistry) Names() []string {
 // LockCollection acquires the per-collection mutex for the given collection name.
 // In multi-collection mode, this allows concurrent sync operations on different
 // collections while serializing sync operations on the same collection.
-// The mutex is lazily created on first use.
+// Panics if name is not a registered collection.
 func (r *CollectionRegistry) LockCollection(name string) {
-	r.mu.Lock()
-	mtx, ok := r.locks[name]
-	if !ok {
-		mtx = &stdsync.Mutex{}
-		r.locks[name] = mtx
-	}
-	r.mu.Unlock()
-	mtx.Lock()
+	r.locks[name].Lock()
 }
 
 // UnlockCollection releases the per-collection mutex for the given collection name.
+// Panics if name is not a registered collection (mismatch with LockCollection is a bug).
 func (r *CollectionRegistry) UnlockCollection(name string) {
-	r.mu.Lock()
-	mtx, ok := r.locks[name]
-	r.mu.Unlock()
-	if ok {
-		mtx.Unlock()
-	}
+	r.locks[name].Unlock()
 }
