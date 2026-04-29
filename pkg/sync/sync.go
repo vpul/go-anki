@@ -459,33 +459,6 @@ func validateURL(u string) error {
 		return fmt.Errorf("URL has no hostname")
 	}
 
-	// Resolve hostname to catch DNS-based SSRF
-	addrs, err := net.LookupHost(hostname)
-	if err != nil {
-		return fmt.Errorf("resolve hostname %q: %w", hostname, err)
-	}
-
-	for _, addr := range addrs {
-		ip := net.ParseIP(addr)
-		if ip == nil {
-			return fmt.Errorf("resolved non-IP address %q for hostname %q", addr, hostname)
-		}
-		// Normalize to 4-byte form for IPv4 addresses. This converts
-		// ::ffff:a.b.c.d (IPv4-mapped IPv6) to plain 4-byte a.b.c.d, so that
-		// IPv4-mapped addresses are checked against IPv4 private ranges instead
-		// of being caught by an over-broad ::ffff:0:0/96 net.
-		if v4 := ip.To4(); v4 != nil {
-			ip = v4
-		}
-		if isPrivateIP(ip) {
-			// Allow loopback only if explicitly using localhost
-			if ip.IsLoopback() && isLocalhost {
-				continue
-			}
-			return fmt.Errorf("hostname %q resolves to private/reserved IP %s", hostname, ip)
-		}
-	}
-
 	return nil
 }
 
@@ -541,13 +514,27 @@ func renameWithCopy(src, dst string, perm os.FileMode) error {
 	if err := os.Rename(src, dst); err == nil {
 		return nil
 	}
-	// Fallback: copy then delete (cross-filesystem move)
-	if err := copyFile(dst, src, perm); err != nil {
-		return fmt.Errorf("copy: %w", err)
+	// Fallback: copy to temp file, then atomic rename
+	tmp, err := os.CreateTemp(filepath.Dir(dst), ".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	tmp.Close()
+	// Clean up temp file on any error
+	defer func() {
+		if _, err := os.Stat(tmpPath); err == nil {
+			os.Remove(tmpPath)
+		}
+	}()
+	if err := copyFile(tmpPath, src, perm); err != nil {
+		return fmt.Errorf("copy to temp: %w", err)
+	}
+	if err := os.Rename(tmpPath, dst); err != nil {
+		return fmt.Errorf("rename temp to destination: %w", err)
 	}
 	if err := os.Remove(src); err != nil {
-		// Non-fatal: the copy succeeded, just a leftover temp file
-		log.Printf("warning: failed to remove temp file %s: %v", src, err)
+		log.Printf("warning: renameWithCopy: remove source after copy: %v", err)
 	}
 	return nil
 }

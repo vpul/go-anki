@@ -44,6 +44,7 @@ func (c *Collection) schemaVersion() int {
 	var ver int
 	err := c.db.QueryRow("SELECT ver FROM col").Scan(&ver)
 	if err != nil {
+		log.Printf("warning: failed to query schema version: %v", err)
 		return 0
 	}
 	c.schema = ver
@@ -150,6 +151,7 @@ func (c *Collection) getModelsV18() (map[int64]goanki.Model, error) {
 		fieldRows, err := c.db.Query("SELECT ntid, ord, name FROM fields WHERE ntid = ? ORDER BY ord", mid)
 		if err != nil {
 			// Log warning but continue - fields are optional for basic operations
+			log.Printf("warning: failed to query fields for model %d: %v", mid, err)
 			continue
 		}
 		var fields []goanki.ModelField
@@ -159,6 +161,7 @@ func (c *Collection) getModelsV18() (map[int64]goanki.Model, error) {
 			var name string
 			if err := fieldRows.Scan(&ntid, &ord, &name); err != nil {
 				_ = fieldRows.Close()
+				log.Printf("warning: failed to scan field for model %d: %v", mid, err)
 				continue
 			}
 			fields = append(fields, goanki.ModelField{
@@ -168,6 +171,7 @@ func (c *Collection) getModelsV18() (map[int64]goanki.Model, error) {
 		}
 		if err := fieldRows.Err(); err != nil {
 			_ = fieldRows.Close()
+			log.Printf("warning: iterate fields for model %d: %v", mid, err)
 			continue
 		}
 		_ = fieldRows.Close()
@@ -176,6 +180,7 @@ func (c *Collection) getModelsV18() (map[int64]goanki.Model, error) {
 		tmplRows, err := c.db.Query("SELECT ntid, ord, name, config FROM templates WHERE ntid = ? ORDER BY ord", mid)
 		if err != nil {
 			// Templates are needed for card rendering
+			log.Printf("warning: failed to query templates for model %d: %v", mid, err)
 			continue
 		}
 		var templates []goanki.ModelTemplate
@@ -185,6 +190,7 @@ func (c *Collection) getModelsV18() (map[int64]goanki.Model, error) {
 			var name string
 			var config []byte
 			if err := tmplRows.Scan(&ntid, &ord, &name, &config); err != nil {
+				log.Printf("warning: failed to scan template for model %d: %v", mid, err)
 				continue
 			}
 			qfmt, afmt := parseTemplateConfig(config)
@@ -197,6 +203,7 @@ func (c *Collection) getModelsV18() (map[int64]goanki.Model, error) {
 		}
 		if err := tmplRows.Err(); err != nil {
 			_ = tmplRows.Close()
+			log.Printf("warning: iterate templates for model %d: %v", mid, err)
 			continue
 		}
 		_ = tmplRows.Close()
