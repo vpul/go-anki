@@ -311,10 +311,10 @@ func runStats() error {
 	return nil
 }
 
-// cmdSync dispatches sync subcommands (download, upload).
+// cmdSync dispatches sync subcommands (download, upload, media).
 func cmdSync() {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "Usage: anki-go sync <download|upload> [options]")
+		fmt.Fprintln(os.Stderr, "Usage: anki-go sync <download|upload|media> [options]")
 		os.Exit(1)
 	}
 
@@ -323,9 +323,32 @@ func cmdSync() {
 		os.Exit(runCmd(runSyncDownload))
 	case "upload":
 		os.Exit(runCmd(runSyncUpload))
+	case "media":
+		cmdSyncMedia()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown sync subcommand: %s\n", os.Args[2])
-		fmt.Fprintln(os.Stderr, "Usage: anki-go sync <download|upload> [options]")
+		fmt.Fprintln(os.Stderr, "Usage: anki-go sync <download|upload|media> [options]")
+		os.Exit(1)
+	}
+}
+
+// cmdSyncMedia dispatches media sync subcommands.
+func cmdSyncMedia() {
+	if len(os.Args) < 4 {
+		fmt.Fprintln(os.Stderr, "Usage: anki-go sync media <download|upload|sanity> [options]")
+		os.Exit(1)
+	}
+
+	switch os.Args[3] {
+	case "download":
+		os.Exit(runCmd(runSyncMediaDownload))
+	case "upload":
+		os.Exit(runCmd(runSyncMediaUpload))
+	case "sanity":
+		os.Exit(runCmd(runSyncMediaSanity))
+	default:
+		fmt.Fprintf(os.Stderr, "unknown media subcommand: %s\n", os.Args[3])
+		fmt.Fprintln(os.Stderr, "Usage: anki-go sync media <download|upload|sanity> [options]")
 		os.Exit(1)
 	}
 }
@@ -422,6 +445,140 @@ func runSyncUpload() error {
 	}
 
 	fmt.Println("Upload complete.")
+	return nil
+}
+
+// runSyncMediaDownload downloads media files from AnkiWeb.
+func runSyncMediaDownload() error {
+	fs := flag.NewFlagSet("sync media download", flag.ExitOnError)
+	media := fs.String("media", "collection.media", "media directory path")
+	username := fs.String("username", envOr("ANKIWEB_USERNAME", ""), "AnkiWeb username (or set $ANKIWEB_USERNAME)")
+	password := envOr("ANKIWEB_PASSWORD", "")
+	timeout := fs.Duration("timeout", 5*time.Minute, "sync timeout")
+	if err := fs.Parse(reorderFlags(os.Args[4:], boolFlagsFor(fs))); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
+
+	if *username == "" || password == "" {
+		return fmt.Errorf("ANKIWEB_USERNAME and ANKIWEB_PASSWORD environment variables are required for sync")
+	}
+
+	client, err := sync.NewClient(goanki.SyncConfig{
+		Username: *username,
+		Password: password,
+	})
+	if err != nil {
+		return fmt.Errorf("create sync client: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	if err := client.Authenticate(ctx); err != nil {
+		return fmt.Errorf("authenticate: %w", err)
+	}
+
+	info, err := client.MediaBegin(ctx)
+	if err != nil {
+		return fmt.Errorf("media begin: %w", err)
+	}
+
+	fmt.Printf("Media USN: %d\n", info.USN)
+	_ = *media // reserved for full implementation
+	fmt.Println("Media download not yet implemented for media sync v2 — API scaffolding ready.")
+	return nil
+}
+
+// runSyncMediaUpload uploads media files to AnkiWeb.
+func runSyncMediaUpload() error {
+	fs := flag.NewFlagSet("sync media upload", flag.ExitOnError)
+	media := fs.String("media", "collection.media", "media directory path")
+	username := fs.String("username", envOr("ANKIWEB_USERNAME", ""), "AnkiWeb username (or set $ANKIWEB_USERNAME)")
+	password := envOr("ANKIWEB_PASSWORD", "")
+	timeout := fs.Duration("timeout", 5*time.Minute, "sync timeout")
+	if err := fs.Parse(reorderFlags(os.Args[4:], boolFlagsFor(fs))); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
+
+	if *username == "" || password == "" {
+		return fmt.Errorf("ANKIWEB_USERNAME and ANKIWEB_PASSWORD environment variables are required for sync")
+	}
+
+	client, err := sync.NewClient(goanki.SyncConfig{
+		Username: *username,
+		Password: password,
+	})
+	if err != nil {
+		return fmt.Errorf("create sync client: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	if err := client.Authenticate(ctx); err != nil {
+		return fmt.Errorf("authenticate: %w", err)
+	}
+
+	info, err := client.MediaBegin(ctx)
+	if err != nil {
+		return fmt.Errorf("media begin: %w", err)
+	}
+
+	fmt.Printf("Media USN: %d\n", info.USN)
+	_ = *media // reserved for full implementation
+	fmt.Println("Media upload not yet implemented for media sync v2 — API scaffolding ready.")
+	return nil
+}
+
+// runSyncMediaSanity performs a media sanity check against AnkiWeb.
+func runSyncMediaSanity() error {
+	fs := flag.NewFlagSet("sync media sanity", flag.ExitOnError)
+	media := fs.String("media", "collection.media", "media directory path")
+	username := fs.String("username", envOr("ANKIWEB_USERNAME", ""), "AnkiWeb username (or set $ANKIWEB_USERNAME)")
+	password := envOr("ANKIWEB_PASSWORD", "")
+	timeout := fs.Duration("timeout", 30*time.Second, "sync timeout")
+	if err := fs.Parse(reorderFlags(os.Args[4:], boolFlagsFor(fs))); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
+
+	if *username == "" || password == "" {
+		return fmt.Errorf("ANKIWEB_USERNAME and ANKIWEB_PASSWORD environment variables are required for sync")
+	}
+
+	client, err := sync.NewClient(goanki.SyncConfig{
+		Username: *username,
+		Password: password,
+	})
+	if err != nil {
+		return fmt.Errorf("create sync client: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	if err := client.Authenticate(ctx); err != nil {
+		return fmt.Errorf("authenticate: %w", err)
+	}
+
+	info, err := client.MediaBegin(ctx)
+	if err != nil {
+		return fmt.Errorf("media begin: %w", err)
+	}
+
+	// Count files in media directory
+	files, err := os.ReadDir(*media)
+	count := 0
+	if err == nil {
+		count = len(files)
+	} else {
+		fmt.Fprintf(os.Stderr, "warning: could not read media directory: %v\n", err)
+	}
+
+	if err := client.MediaSanity(ctx, info, count); err != nil {
+		return fmt.Errorf("media sanity check: %w", err)
+	}
+
+	fmt.Printf("Media sanity check passed (local files: %d)\n", count)
 	return nil
 }
 
