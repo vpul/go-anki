@@ -311,10 +311,10 @@ func runStats() error {
 	return nil
 }
 
-// cmdSync dispatches sync subcommands (download, upload, media).
+// cmdSync dispatches sync subcommands (download, upload, delta, media).
 func cmdSync() {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "Usage: anki-go sync <download|upload|media> [options]")
+		fmt.Fprintln(os.Stderr, "Usage: anki-go sync <download|upload|delta|media> [options]")
 		os.Exit(1)
 	}
 
@@ -329,7 +329,7 @@ func cmdSync() {
 		cmdSyncMedia()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown sync subcommand: %s\n", os.Args[2])
-		fmt.Fprintln(os.Stderr, "Usage: anki-go sync <download|upload|media> [options]")
+		fmt.Fprintln(os.Stderr, "Usage: anki-go sync <download|upload|delta|media> [options]")
 		os.Exit(1)
 	}
 }

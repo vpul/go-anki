@@ -338,34 +338,53 @@ func (d *DeltaSyncClient) FullSync(ctx context.Context, dbPath string) error {
 		return fmt.Errorf("get local changes: %w", err)
 	}
 
-	// Step 4: ApplyChanges (send local, receive remote)
+	// Step 4-7: Paginated apply changes loop
 	remoteDelta, err := d.ApplyChanges(ctx, localDelta)
 	if err != nil {
 		return fmt.Errorf("apply changes: %w", err)
 	}
 
-	// Step 5: ApplyGraves (send deletions)
-	if len(localDelta.Graves) > 0 {
-		if err := d.ApplyGraves(ctx, localDelta.Graves); err != nil {
-			return fmt.Errorf("apply graves: %w", err)
-		}
-	}
+	lastUSN := localDelta.USN
 
-	// Step 6: Apply remote changes to local collection
-	if remoteDelta != nil && (len(remoteDelta.Cards) > 0 || len(remoteDelta.Notes) > 0 ||
-		len(remoteDelta.Decks) > 0 || len(remoteDelta.Graves) > 0) {
-		if err := col.ApplyChanges(ctx, remoteDelta); err != nil {
-			return fmt.Errorf("apply remote changes: %w", err)
+	for {
+		// Step 5: ApplyGraves (send deletions)
+		if len(localDelta.Graves) > 0 {
+			if err := d.ApplyGraves(ctx, localDelta.Graves); err != nil {
+				return fmt.Errorf("apply graves: %w", err)
+			}
+		}
+
+		// Step 6: Apply remote changes to local collection
+		if remoteDelta != nil && (len(remoteDelta.Cards) > 0 || len(remoteDelta.Notes) > 0 ||
+			len(remoteDelta.Decks) > 0 || len(remoteDelta.Graves) > 0) {
+			if err := col.ApplyChanges(ctx, remoteDelta); err != nil {
+				return fmt.Errorf("apply remote changes: %w", err)
+			}
+		}
+
+		if remoteDelta != nil && remoteDelta.USN > lastUSN {
+			lastUSN = remoteDelta.USN
+		}
+
+		if !remoteDelta.More {
+			break
+		}
+
+		// Get new local changes since last USN and continue pagination
+		localDelta, err = col.GetChanges(ctx, lastUSN)
+		if err != nil {
+			return fmt.Errorf("get local changes for pagination: %w", err)
+		}
+
+		remoteDelta, err = d.ApplyChanges(ctx, localDelta)
+		if err != nil {
+			return fmt.Errorf("apply changes (pagination): %w", err)
 		}
 	}
 
 	// Step 7: MarkSynced with new USN
-	newUSN := localDelta.USN
-	if remoteDelta != nil && remoteDelta.USN > newUSN {
-		newUSN = remoteDelta.USN
-	}
-	if newUSN > 0 {
-		if err := col.MarkSynced(ctx, newUSN); err != nil {
+	if lastUSN > 0 {
+		if err := col.MarkSynced(ctx, lastUSN); err != nil {
 			return fmt.Errorf("mark synced: %w", err)
 		}
 	}

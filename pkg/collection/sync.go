@@ -10,18 +10,37 @@ import (
 	goanki "github.com/vpul/go-anki/pkg/types"
 )
 
-// maxUSN returns the maximum USN across cards, notes, and decks tables,
-// and the graves table. This represents the highest known update sequence number.
+// maxUSN returns the maximum USN across cards, notes, and graves tables,
+// and the graves table. For v18+ collections, also queries tables with
+// their own USN columns: decks, notetypes, templates, deck_config, fields, tags.
+// This represents the highest known update sequence number.
 func (c *Collection) maxUSN(ctx context.Context) (int, error) {
 	var usn int
-	err := c.db.QueryRowContext(ctx, `
+	query := `
 		SELECT MAX(max_usn) FROM (
 			SELECT COALESCE(MAX(usn), 0) AS max_usn FROM cards
 			UNION ALL
 			SELECT COALESCE(MAX(usn), 0) FROM notes
 			UNION ALL
-			SELECT COALESCE(MAX(usn), 0) FROM graves
-		)`).Scan(&usn)
+			SELECT COALESCE(MAX(usn), 0) FROM graves`
+	if c.isV18Plus() {
+		query += `
+			UNION ALL
+			SELECT COALESCE(MAX(usn), 0) FROM decks
+			UNION ALL
+			SELECT COALESCE(MAX(usn), 0) FROM notetypes
+			UNION ALL
+			SELECT COALESCE(MAX(usn), 0) FROM templates
+			UNION ALL
+			SELECT COALESCE(MAX(usn), 0) FROM deck_config
+			UNION ALL
+			SELECT COALESCE(MAX(usn), 0) FROM fields
+			UNION ALL
+			SELECT COALESCE(MAX(usn), 0) FROM tags`
+	}
+	query += `
+		)`
+	err := c.db.QueryRowContext(ctx, query).Scan(&usn)
 	if err != nil {
 		return 0, fmt.Errorf("query max usn: %w", err)
 	}
@@ -298,7 +317,7 @@ func (c *Collection) ApplyChanges(ctx context.Context, delta *goanki.SyncDelta) 
 			}
 		} else {
 			// v11: update JSON blob in col table
-			if err := c.applyDeckChangeV11(tx, deck); err != nil {
+			if err := c.applyDeckChangeV11(ctx, tx, deck); err != nil {
 				return err
 			}
 		}
@@ -318,9 +337,9 @@ func (c *Collection) ApplyChanges(ctx context.Context, delta *goanki.SyncDelta) 
 }
 
 // applyDeckChangeV11 updates a single deck in the v11 JSON blob.
-func (c *Collection) applyDeckChangeV11(tx *sql.Tx, deck goanki.Deck) error {
+func (c *Collection) applyDeckChangeV11(ctx context.Context, tx *sql.Tx, deck goanki.Deck) error {
 	var decksJSON string
-	err := tx.QueryRow("SELECT decks FROM col").Scan(&decksJSON)
+	err := tx.QueryRowContext(ctx, "SELECT decks FROM col").Scan(&decksJSON)
 	if err != nil {
 		return fmt.Errorf("query decks json: %w", err)
 	}
@@ -337,7 +356,7 @@ func (c *Collection) applyDeckChangeV11(tx *sql.Tx, deck goanki.Deck) error {
 		return fmt.Errorf("marshal decks json: %w", err)
 	}
 
-	_, err = tx.Exec("UPDATE col SET decks = ?, mod = ?", newJSON, time.Now().Unix())
+	_, err = tx.ExecContext(ctx, "UPDATE col SET decks = ?, mod = ?", newJSON, time.Now().Unix())
 	if err != nil {
 		return fmt.Errorf("update col decks: %w", err)
 	}
@@ -369,7 +388,9 @@ func (c *Collection) applyGrave(ctx context.Context, tx *sql.Tx, grave goanki.Gr
 				return fmt.Errorf("delete deck %d from grave: %w", grave.OID, err)
 			}
 			// Also remove deck_config
-			_, _ = tx.ExecContext(ctx, "DELETE FROM deck_config WHERE id = ?", grave.OID)
+			if _, err := tx.ExecContext(ctx, "DELETE FROM deck_config WHERE id = ?", grave.OID); err != nil {
+				return fmt.Errorf("delete deck_config %d from grave: %w", grave.OID, err)
+			}
 		} else {
 			// v11: remove from JSON blob
 			var decksJSON string
@@ -459,10 +480,42 @@ func (c *Collection) MarkSynced(ctx context.Context, usn int) error {
 		if err != nil {
 			return fmt.Errorf("mark decks synced: %w", err)
 		}
-		// Also update deck_config, notetypes, templates if needed
-		_, _ = tx.ExecContext(ctx, "UPDATE deck_config SET usn = ? WHERE usn = -1", usn)
-		_, _ = tx.ExecContext(ctx, "UPDATE notetypes SET usn = ? WHERE usn = -1", usn)
-		_, _ = tx.ExecContext(ctx, "UPDATE templates SET usn = ? WHERE usn = -1", usn)
+		// Also update deck_config, notetypes, templates, fields
+		if _, err := tx.ExecContext(ctx, "UPDATE deck_config SET usn = ? WHERE usn = -1", usn); err != nil {
+			return fmt.Errorf("mark deck_config synced: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "UPDATE notetypes SET usn = ? WHERE usn = -1", usn); err != nil {
+			return fmt.Errorf("mark notetypes synced: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "UPDATE templates SET usn = ? WHERE usn = -1", usn); err != nil {
+			return fmt.Errorf("mark templates synced: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "UPDATE fields SET usn = ? WHERE usn = -1", usn); err != nil {
+			return fmt.Errorf("mark fields synced: %w", err)
+		}
+	} else {
+		// v11: decks are stored as JSON in col.decks — reload, update usn, write back.
+		var decksJSON string
+		if err := tx.QueryRowContext(ctx, "SELECT decks FROM col").Scan(&decksJSON); err != nil {
+			return fmt.Errorf("query decks json for mark synced: %w", err)
+		}
+		deckMap, err := goanki.ParseDecksJSON([]byte(decksJSON))
+		if err != nil {
+			return fmt.Errorf("parse decks json for mark synced: %w", err)
+		}
+		for _, d := range deckMap {
+			if d.USN == -1 {
+				d.USN = usn
+				deckMap[d.ID] = d
+			}
+		}
+		newJSON, err := goanki.MarshalDecksJSON(deckMap)
+		if err != nil {
+			return fmt.Errorf("marshal decks json for mark synced: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "UPDATE col SET decks = ?", string(newJSON)); err != nil {
+			return fmt.Errorf("update col decks for mark synced: %w", err)
+		}
 	}
 
 	// Mark graves with usn=-1 to the new usn (these are deletions we just uploaded)

@@ -110,7 +110,7 @@ golangci-lint run ./...
 5. NEVER push to main directly
 
 ## v2 Features (from SPEC.md)
-- [ ] Incremental delta sync (bidirectional changes — USN tracking, conflict resolution)
-- [ ] Media sync (AnkiWeb `/msync/` API — images, audio files)
-- [ ] AnkiWeb streaming sync (chunked transfers, avoid loading full DB into memory)
+- [x] Incremental delta sync (bidirectional changes — USN tracking, conflict resolution)
+- [x] Media sync (AnkiWeb `/msync/` API — images, audio files)
+- [x] AnkiWeb streaming sync (chunked transfers, avoid loading full DB into memory)
 - [x] Multiple collection support (server handles multiple .anki2 files simultaneously)

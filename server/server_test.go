@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/vpul/go-anki/pkg/collection"
 	"github.com/vpul/go-anki/pkg/scheduler"
+	"github.com/vpul/go-anki/pkg/sync"
 	goanki "github.com/vpul/go-anki/pkg/types"
 )
 
@@ -509,7 +511,146 @@ func TestSyncDownloadWithoutConfig(t *testing.T) {
 	}
 }
 
-// TestSyncUploadWithoutConfig verifies sync upload returns 503 without config.
+// TestSyncDeltaWithoutConfig verifies sync delta returns 503 without config.
+func TestSyncDeltaWithoutConfig(t *testing.T) {
+	srv, _ := setupServer(t)
+	handler := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sync/delta", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status 503, got %d", w.Code)
+	}
+}
+
+// TestSyncDeltaClientFullSync verifies a full delta sync cycle against a mock AnkiWeb server.
+func TestSyncDeltaClientFullSync(t *testing.T) {
+	// Create a test collection DB
+	dbPath := createTestDB(t)
+
+	// Track session key for validation
+	var sessionKey string
+
+	// Mock AnkiWeb delta sync server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sync/hostKey":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"key":"delta-mock-key"}`))
+			sessionKey = "delta-mock-key"
+		case "/sync/start":
+			if r.URL.Query().Get("k") != sessionKey {
+				t.Errorf("expected session key %q", sessionKey)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"data":{"scm":1700000000,"usn":0,"hostNum":0}}`))
+		case "/sync/applyChanges":
+			if r.URL.Query().Get("k") != sessionKey {
+				t.Errorf("expected session key %q", sessionKey)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			// Return no changes and more=false to end pagination
+			_, _ = w.Write([]byte(`{"data":{"cards":null,"notes":null,"decks":null,"graves":null,"usn":0,"more":false}}`))
+		case "/sync/applyGraves":
+			if r.URL.Query().Get("k") != sessionKey {
+				t.Errorf("expected session key %q", sessionKey)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"data":{"usn":0}}`))
+		case "/sync/finish":
+			if r.URL.Query().Get("k") != sessionKey {
+				t.Errorf("expected session key %q", sessionKey)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"data":{"scm":1700000000,"usn":0,"hostNum":0}}`))
+		default:
+			t.Errorf("unexpected mock server path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := sync.NewDeltaClientWithURL(goanki.SyncConfig{
+		Username: "test@example.com",
+		Password: "secret",
+	}, server.URL+"/sync/")
+	if err != nil {
+		t.Fatalf("NewDeltaClientWithURL: %v", err)
+	}
+
+	// Run FullSync — this exercises Authenticate, SyncStart, ApplyChanges, ApplyGraves, SyncFinish
+	// against the mock server, plus collection operations on the test DB.
+	if err := client.FullSync(context.Background(), dbPath); err != nil {
+		t.Fatalf("FullSync: %v", err)
+	}
+}
+
+// TestSyncDeltaClientFullSyncPagination verifies pagination loop (More field).
+func TestSyncDeltaClientFullSyncPagination(t *testing.T) {
+	dbPath := createTestDB(t)
+
+	applyCount := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sync/hostKey":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"key":"mock-pagination-key"}`))
+		case "/sync/start":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"data":{"scm":1700000001,"usn":0,"hostNum":0}}`))
+		case "/sync/applyChanges":
+			applyCount++
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			if applyCount <= 2 {
+				// Return more=true for first two calls
+				_, _ = w.Write([]byte(`{"data":{"cards":null,"notes":null,"decks":null,"graves":null,"usn":0,"more":true}}`))
+			} else {
+				// Return more=false on third call to stop pagination
+				_, _ = w.Write([]byte(`{"data":{"cards":null,"notes":null,"decks":null,"graves":null,"usn":0,"more":false}}`))
+			}
+		case "/sync/applyGraves":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"data":{"usn":0}}`))
+		case "/sync/finish":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"data":{"scm":1700000001,"usn":0,"hostNum":0}}`))
+		default:
+			t.Errorf("unexpected mock path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := sync.NewDeltaClientWithURL(goanki.SyncConfig{
+		Username: "test@example.com",
+		Password: "secret",
+	}, server.URL+"/sync/")
+	if err != nil {
+		t.Fatalf("NewDeltaClientWithURL: %v", err)
+	}
+
+	if err := client.FullSync(context.Background(), dbPath); err != nil {
+		t.Fatalf("FullSync with pagination: %v", err)
+	}
+
+	if applyCount < 2 {
+		t.Errorf("expected at least 2 applyChanges calls for pagination, got %d", applyCount)
+	}
+}
+
 func TestSyncUploadWithoutConfig(t *testing.T) {
 	srv, _ := setupServer(t)
 	handler := srv.Handler()
