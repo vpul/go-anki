@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -522,6 +523,96 @@ func TestSyncDeltaWithoutConfig(t *testing.T) {
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected status 503, got %d", w.Code)
+	}
+}
+
+// TestSyncDeltaHandler verifies the POST /api/v1/sync/delta endpoint with a mock AnkiWeb server.
+func TestSyncDeltaHandler(t *testing.T) {
+	// Create a test collection DB
+	dbPath := createTestDB(t)
+
+	var sessionKey atomic.Value
+	sessionKey.Store("")
+
+	// Mock AnkiWeb delta sync server
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sync/hostKey":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"key":"handler-mock-key"}`))
+			sessionKey.Store("handler-mock-key")
+		case "/sync/start":
+			if r.URL.Query().Get("k") != sessionKey.Load().(string) {
+				t.Errorf("expected session key %q, got %q", sessionKey.Load().(string), r.URL.Query().Get("k"))
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"data":{"scm":1700000000,"usn":0,"hostNum":0}}`))
+		case "/sync/applyChanges":
+			if r.URL.Query().Get("k") != sessionKey.Load().(string) {
+				t.Errorf("expected session key %q, got %q", sessionKey.Load().(string), r.URL.Query().Get("k"))
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"data":{"cards":null,"notes":null,"decks":null,"graves":null,"usn":0,"more":false}}`))
+		case "/sync/applyGraves":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"data":{"usn":0}}`))
+		case "/sync/finish":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"data":{"scm":1700000000,"usn":0,"hostNum":0}}`))
+		default:
+			t.Errorf("unexpected mock server path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer mockServer.Close()
+
+	// Create server with sync config pointing at the mock
+	srv := NewServer(dbPath,
+		WithScheduler(scheduler.NewFSRSScheduler()),
+		WithSyncConfig(goanki.SyncConfig{
+			Username: "test@example.com",
+			Password: "secret",
+			SyncURL:  mockServer.URL + "/sync/",
+		}),
+	)
+	handler := srv.Handler()
+
+	// Call the delta sync endpoint
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sync/delta", nil)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	// Verify response
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d; body: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if resp["status"] != "ok" {
+		t.Errorf("expected status 'ok', got %q", resp["status"])
+	}
+
+	// Verify cards_before and cards_after are present
+	if _, ok := resp["cards_before"]; !ok {
+		t.Error("expected cards_before in response")
+	}
+	if _, ok := resp["cards_after"]; !ok {
+		t.Error("expected cards_after in response")
+	}
+
+	// Verify the mock server was actually hit (sessionKey should be set)
+	if sessionKey.Load().(string) != "handler-mock-key" {
+		t.Error("mock server was not called")
 	}
 }
 
