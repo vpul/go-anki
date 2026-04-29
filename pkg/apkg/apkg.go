@@ -154,7 +154,7 @@ func ExportApkg(opts ExportOptions) error {
 
 	// Add media files
 	for idxStr, filename := range mediaMap {
-		if err := validateMediaFilename(filename); err != nil {
+		if err := ValidateMediaFilename(filename); err != nil {
 			return fmt.Errorf("invalid media filename %q in map: %w", filename, err)
 		}
 		mediaPath := filepath.Join(opts.MediaDir, filename)
@@ -281,7 +281,7 @@ func ImportApkg(apkgPath string, destDir string) (*ImportResult, error) {
 			if !ok {
 				continue
 			}
-			if err := validateMediaFilename(filename); err != nil {
+			if err := ValidateMediaFilename(filename); err != nil {
 				return nil, fmt.Errorf("invalid media filename in archive: %w", err)
 			}
 			mediaPath := filepath.Join(mediaDir, filename)
@@ -386,7 +386,7 @@ func ImportColpkg(colpkgPath string, destDir string) (*ImportResult, error) {
 			if !ok {
 				continue
 			}
-			if err := validateMediaFilename(filename); err != nil {
+			if err := ValidateMediaFilename(filename); err != nil {
 				return nil, fmt.Errorf("invalid media filename in archive: %w", err)
 			}
 			mediaPath := filepath.Join(mediaDir, filename)
@@ -445,7 +445,7 @@ func validateZipEntryName(entryName, destDir string) error {
 // not be empty.
 var validMediaFilenameRe = regexp.MustCompile(`^[a-zA-Z0-9_]([a-zA-Z0-9_.-]*[a-zA-Z0-9_.-])?$|^[a-zA-Z0-9_]$`)
 
-func validateMediaFilename(name string) error {
+func ValidateMediaFilename(name string) error {
 	if name == "" {
 		return fmt.Errorf("invalid media filename: %q", name)
 	}
@@ -572,7 +572,7 @@ func discoverMediaFiles(mediaDir string) (MediaMap, error) {
 		if strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
-		if err := validateMediaFilename(entry.Name()); err != nil {
+		if err := ValidateMediaFilename(entry.Name()); err != nil {
 			continue
 		}
 		if idx >= maxFileCount {
