@@ -389,6 +389,7 @@ func (s *Server) registerCollectionRoutes(mux *http.ServeMux, prefix string) {
 	mux.Handle("POST "+prefix+"/notes", wrap(s.withMode(collection.ReadWrite, s.handleAddNote)))
 	mux.Handle("POST "+prefix+"/sync/download", wrap(http.HandlerFunc(s.handleSyncDownload)))
 	mux.Handle("POST "+prefix+"/sync/upload", wrap(http.HandlerFunc(s.handleSyncUpload)))
+	mux.Handle("POST "+prefix+"/sync/delta", wrap(http.HandlerFunc(s.handleSyncDelta)))
 }
 
 // maxBodySize is middleware that limits the request body size for all requests.
@@ -890,4 +891,67 @@ func (s *Server) handleSyncUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, addCollection(r, map[string]interface{}{"status": "ok"}))
+}
+
+// handleSyncDelta performs an incremental delta sync with AnkiWeb.
+func (s *Server) handleSyncDelta(w http.ResponseWriter, r *http.Request) {
+	s.syncMu.Lock()
+	defer s.syncMu.Unlock()
+
+	// Block write handlers from opening the DB while sync operates
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	if s.syncConfig == nil {
+		errorResponse(w, http.StatusServiceUnavailable, "sync not configured: set SyncConfig")
+		return
+	}
+
+	dbPath := s.dbPathFromContext(r)
+
+	client, err := sync.NewDeltaClient(*s.syncConfig)
+	if err != nil {
+		log.Printf("create delta sync client: %v", err)
+		errorResponse(w, http.StatusInternalServerError, "sync client initialization failed")
+		return
+	}
+	ctx := r.Context()
+
+	if err := client.Authenticate(ctx); err != nil {
+		errorResponse(w, http.StatusUnauthorized, "sync authentication failed")
+		return
+	}
+
+	// Count cards before sync
+	cardsBefore := 0
+	col, err := collection.Open(dbPath, collection.ReadOnly)
+	if err == nil {
+		stats, statsErr := col.GetStats()
+		if statsErr == nil {
+			cardsBefore = stats.TotalCards
+		}
+		_ = col.Close()
+	}
+
+	if err := client.FullSync(ctx, dbPath); err != nil {
+		errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
+		return
+	}
+
+	// Count cards after sync
+	cardsAfter := 0
+	col, err = collection.Open(dbPath, collection.ReadOnly)
+	if err == nil {
+		stats, statsErr := col.GetStats()
+		if statsErr == nil {
+			cardsAfter = stats.TotalCards
+		}
+		_ = col.Close()
+	}
+
+	jsonResponse(w, addCollection(r, map[string]interface{}{
+		"status":       "ok",
+		"cards_before": cardsBefore,
+		"cards_after":  cardsAfter,
+	}))
 }

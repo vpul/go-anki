@@ -311,10 +311,10 @@ func runStats() error {
 	return nil
 }
 
-// cmdSync dispatches sync subcommands (download, upload, media).
+// cmdSync dispatches sync subcommands (download, upload, delta, media).
 func cmdSync() {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "Usage: anki-go sync <download|upload|media> [options]")
+		fmt.Fprintln(os.Stderr, "Usage: anki-go sync <download|upload|delta|media> [options]")
 		os.Exit(1)
 	}
 
@@ -323,11 +323,13 @@ func cmdSync() {
 		os.Exit(runCmd(runSyncDownload))
 	case "upload":
 		os.Exit(runCmd(runSyncUpload))
+	case "delta":
+		os.Exit(runCmd(runSyncDelta))
 	case "media":
 		cmdSyncMedia()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown sync subcommand: %s\n", os.Args[2])
-		fmt.Fprintln(os.Stderr, "Usage: anki-go sync <download|upload|media> [options]")
+		fmt.Fprintln(os.Stderr, "Usage: anki-go sync <download|upload|delta|media> [options]")
 		os.Exit(1)
 	}
 }
@@ -445,6 +447,63 @@ func runSyncUpload() error {
 	}
 
 	fmt.Println("Upload complete.")
+	return nil
+}
+
+// runSyncDelta performs an incremental delta sync with AnkiWeb.
+func runSyncDelta() error {
+	fs := flag.NewFlagSet("sync delta", flag.ExitOnError)
+	db := fs.String("db", "collection.anki2", "path to collection database")
+	username := fs.String("username", envOr("ANKIWEB_USERNAME", ""), "AnkiWeb username (or set $ANKIWEB_USERNAME)")
+	password := envOr("ANKIWEB_PASSWORD", "")
+	timeout := fs.Duration("timeout", 5*time.Minute, "sync timeout")
+	if err := fs.Parse(reorderFlags(os.Args[3:], boolFlagsFor(fs))); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
+
+	if *username == "" || password == "" {
+		return fmt.Errorf("ANKIWEB_USERNAME and ANKIWEB_PASSWORD environment variables are required for sync")
+	}
+
+	client, err := sync.NewDeltaClient(goanki.SyncConfig{
+		Username: *username,
+		Password: password,
+	})
+	if err != nil {
+		return fmt.Errorf("create delta sync client: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	// Count cards before sync
+	col, openErr := collection.Open(*db, collection.ReadOnly)
+	cardsBefore := 0
+	usnBefore := 0
+	if openErr == nil {
+		stats, statsErr := col.GetStats()
+		if statsErr == nil {
+			cardsBefore = stats.TotalCards
+		}
+		_ = col.Close()
+	}
+
+	if err := client.FullSync(ctx, *db); err != nil {
+		return fmt.Errorf("delta sync: %w", err)
+	}
+
+	// Count cards after sync
+	col, openErr = collection.Open(*db, collection.ReadOnly)
+	cardsAfter := 0
+	if openErr == nil {
+		stats, statsErr := col.GetStats()
+		if statsErr == nil {
+			cardsAfter = stats.TotalCards
+		}
+		_ = col.Close()
+	}
+
+	fmt.Printf("Delta sync complete: cards before=%d after=%d usn_before=%d\n", cardsBefore, cardsAfter, usnBefore)
 	return nil
 }
 
