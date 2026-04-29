@@ -41,4 +41,4 @@
 | Server delta sync test | Claude Code | `test/delta-server-test` | [#24](https://github.com/vpul/go-anki/pull/24) | ✅ Merged |
 
 ### What's Deferred (Future)
-- Full media upload/download implementation (API scaffolding in place)
+- Nothing — all features complete
