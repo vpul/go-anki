@@ -120,3 +120,27 @@ type SyncMeta struct {
 	MediaUSN    int   `json:"musn"`    // Media update sequence number
 	Timestamp   int64 `json:"ts"`      // Server timestamp
 }
+
+// Grave represents a deletion record in the graves table.
+type Grave struct {
+	OID  int64 `json:"oid"`  // Object ID
+	Type int8  `json:"type"` // Object type (1=card, 2=note, 3=deck)
+	USN  int   `json:"usn"`  // Update sequence number
+}
+
+// SyncState represents the sync state for delta negotiation.
+type SyncState struct {
+	SCM     int64 `json:"scm"`     // Server collection modification time (crt from col)
+	USN     int   `json:"usn"`     // Current update sequence number
+	HostNum int   `json:"hostNum"` // Host number (from server)
+}
+
+// SyncDelta holds changes for a sync round-trip.
+type SyncDelta struct {
+	Cards  []Card  `json:"cards,omitempty"`
+	Notes  []Note  `json:"notes,omitempty"`
+	Decks  []Deck  `json:"decks,omitempty"`
+	Graves []Grave `json:"graves,omitempty"`
+	USN    int     `json:"usn"`   // After applying this delta
+	More   bool    `json:"more"`  // True if there are more changes
+}
