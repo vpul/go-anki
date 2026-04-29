@@ -32,14 +32,13 @@
 - CLI: `anki-go sync delta` subcommand
 - 17+ tests covering unit, integration, and pagination
 
-### Current Sprint
+### Current Sprint — ✅ Complete
 
-| Task | Agent | Branch | Status |
-|------|-------|--------|--------|
-| Streaming upload protocol | Claude Code | `feat/streaming-upload` | 🔄 In Progress |
-| Per-collection locks | OpenCode | `fix/per-collection-locks` | 🔄 In Progress |
-| Server delta sync test | Claude Code | `test/delta-server-test` | 🔄 In Progress |
-| Code review all | Review Agent | — | ⏳ Pending |
+| Task | Agent | Branch | PR | Status |
+|------|-------|--------|----|--------|
+| Streaming upload protocol | Claude Code | `feat/streaming-upload` | [#22](https://github.com/vpul/go-anki/pull/22) | ✅ Merged |
+| Per-collection locks | OpenCode | `fix/per-collection-locks` | [#23](https://github.com/vpul/go-anki/pull/23) | ✅ Merged |
+| Server delta sync test | Claude Code | `test/delta-server-test` | [#24](https://github.com/vpul/go-anki/pull/24) | ✅ Merged |
 
 ### What's Deferred (Future)
 - Full media upload/download implementation (API scaffolding in place)

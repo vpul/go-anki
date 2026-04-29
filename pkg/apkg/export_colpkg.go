@@ -121,7 +121,7 @@ func ExportColpkg(opts ExportColpkgOptions) error {
 
 	// Add media files
 	for idxStr, filename := range mediaMap {
-		if err := validateMediaFilename(filename); err != nil {
+		if err := ValidateMediaFilename(filename); err != nil {
 			return fmt.Errorf("invalid media filename %q in map: %w", filename, err)
 		}
 		mediaPath := filepath.Join(opts.MediaDir, filename)

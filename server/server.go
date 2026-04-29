@@ -10,9 +10,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -21,6 +24,7 @@ import (
 
 	goanki "github.com/vpul/go-anki/pkg/types"
 
+	"github.com/vpul/go-anki/pkg/apkg"
 	"github.com/vpul/go-anki/pkg/collection"
 	"github.com/vpul/go-anki/pkg/scheduler"
 	"github.com/vpul/go-anki/pkg/sync"
@@ -29,6 +33,9 @@ import (
 const (
 	// maxBodyBytes is the maximum allowed request body size (1MB).
 	maxBodyBytes int64 = 1 << 20
+
+	// maxMediaBytes is the maximum allowed media upload size (50MB).
+	maxMediaBytes int64 = 50 << 20
 
 	// maxTrackedIPs caps the number of distinct IP addresses tracked by the
 	// rate limiter, preventing memory exhaustion from unbounded map growth.
@@ -413,16 +420,10 @@ func (s *Server) registerCollectionRoutes(mux *http.ServeMux, prefix string) {
 	mux.Handle("POST "+prefix+"/sync/download", wrap(http.HandlerFunc(s.handleSyncDownload)))
 	mux.Handle("POST "+prefix+"/sync/upload", wrap(http.HandlerFunc(s.handleSyncUpload)))
 	mux.Handle("POST "+prefix+"/sync/delta", wrap(http.HandlerFunc(s.handleSyncDelta)))
-}
-
-// maxBodySize is middleware that limits the request body size for all requests.
-func maxBodySize(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Body != nil {
-			r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
-		}
-		next.ServeHTTP(w, r)
-	})
+	mux.Handle("GET "+prefix+"/media", wrap(http.HandlerFunc(s.handleListMedia)))
+	mux.Handle("GET "+prefix+"/media/{filename...}", wrap(http.HandlerFunc(s.handleGetMedia)))
+	mux.Handle("POST "+prefix+"/media/{filename...}", wrap(http.HandlerFunc(s.handleUploadMedia)))
+	mux.Handle("DELETE "+prefix+"/media/{filename...}", wrap(http.HandlerFunc(s.handleDeleteMedia)))
 }
 
 // securityHeaders adds defensive HTTP headers to all responses.
@@ -549,7 +550,7 @@ func (s *Server) Handler() http.Handler {
 		s.registerCollectionRoutes(mux, "/api/v1")
 	}
 
-	return recoverPanic(securityHeaders(s.rateLimitMiddleware(s.requireAuth(maxBodySize(mux)))))
+	return recoverPanic(securityHeaders(s.rateLimitMiddleware(s.requireAuth(mux))))
 }
 
 // ListenAndServe starts the HTTP server on the configured port.
@@ -719,6 +720,7 @@ type answerRequest struct {
 
 // handleAnswer processes a card answer and updates its scheduling.
 func (s *Server) handleAnswer(col *collection.Collection, w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	var req answerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid request body")
@@ -761,6 +763,7 @@ type createDeckRequest struct {
 
 // handleCreateDeck creates a new deck.
 func (s *Server) handleCreateDeck(col *collection.Collection, w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	var req createDeckRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid request body")
@@ -789,6 +792,7 @@ type addNoteRequest struct {
 
 // handleAddNote creates a new note and its associated cards.
 func (s *Server) handleAddNote(col *collection.Collection, w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	var req addNoteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid request body")
@@ -997,4 +1001,120 @@ func (s *Server) handleSyncDelta(w http.ResponseWriter, r *http.Request) {
 		"cards_before": cardsBefore,
 		"cards_after":  cardsAfter,
 	}))
+}
+
+// handleListMedia returns a list of media files in the media directory.
+func (s *Server) handleListMedia(w http.ResponseWriter, r *http.Request) {
+	if s.mediaDir == "" {
+		errorResponse(w, http.StatusNotFound, "media directory not configured")
+		return
+	}
+	entries, err := os.ReadDir(s.mediaDir)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "read media directory")
+		return
+	}
+	files := make([]map[string]interface{}, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		files = append(files, map[string]interface{}{
+			"name": e.Name(),
+			"size": info.Size(),
+		})
+	}
+	jsonResponse(w, addCollection(r, map[string]interface{}{"media": files}))
+}
+
+// handleGetMedia serves a single media file by filename.
+func (s *Server) handleGetMedia(w http.ResponseWriter, r *http.Request) {
+	if s.mediaDir == "" {
+		errorResponse(w, http.StatusNotFound, "media directory not configured")
+		return
+	}
+	filename := r.PathValue("filename")
+	if err := apkg.ValidateMediaFilename(filename); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid filename")
+		return
+	}
+	path := filepath.Join(s.mediaDir, filename)
+	if !strings.HasPrefix(path, filepath.Clean(s.mediaDir)+string(filepath.Separator)) {
+		errorResponse(w, http.StatusBadRequest, "invalid filename")
+		return
+	}
+	// Check file exists before serving, so we can return a JSON error
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		errorResponse(w, http.StatusNotFound, "media file not found")
+		return
+	}
+	http.ServeFile(w, r, path)
+}
+
+// handleUploadMedia uploads a media file. The body is the raw file content.
+func (s *Server) handleUploadMedia(w http.ResponseWriter, r *http.Request) {
+	if s.mediaDir == "" {
+		errorResponse(w, http.StatusNotFound, "media directory not configured")
+		return
+	}
+	filename := r.PathValue("filename")
+	if err := apkg.ValidateMediaFilename(filename); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid filename")
+		return
+	}
+	// Enforce size limit for media uploads
+	r.Body = http.MaxBytesReader(w, r.Body, maxMediaBytes)
+	path := filepath.Join(s.mediaDir, filename)
+	if !strings.HasPrefix(path, filepath.Clean(s.mediaDir)+string(filepath.Separator)) {
+		errorResponse(w, http.StatusBadRequest, "invalid filename")
+		return
+	}
+	dst, err := os.Create(path)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "create media file")
+		return
+	}
+	defer func() { _ = dst.Close() }()
+	if _, err := io.Copy(dst, r.Body); err != nil {
+		_ = os.Remove(path)
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			errorResponse(w, http.StatusRequestEntityTooLarge, "file too large")
+		} else {
+			errorResponse(w, http.StatusInternalServerError, "write media file")
+		}
+		return
+	}
+	jsonResponse(w, addCollection(r, map[string]interface{}{"status": "ok", "filename": filename}))
+}
+
+// handleDeleteMedia deletes a media file.
+func (s *Server) handleDeleteMedia(w http.ResponseWriter, r *http.Request) {
+	if s.mediaDir == "" {
+		errorResponse(w, http.StatusNotFound, "media directory not configured")
+		return
+	}
+	filename := r.PathValue("filename")
+	if err := apkg.ValidateMediaFilename(filename); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid filename")
+		return
+	}
+	path := filepath.Join(s.mediaDir, filename)
+	if !strings.HasPrefix(path, filepath.Clean(s.mediaDir)+string(filepath.Separator)) {
+		errorResponse(w, http.StatusBadRequest, "invalid filename")
+		return
+	}
+	if err := os.Remove(path); err != nil {
+		if os.IsNotExist(err) {
+			errorResponse(w, http.StatusNotFound, "media file not found")
+			return
+		}
+		errorResponse(w, http.StatusInternalServerError, "delete media file")
+		return
+	}
+	jsonResponse(w, addCollection(r, map[string]interface{}{"status": "ok"}))
 }
