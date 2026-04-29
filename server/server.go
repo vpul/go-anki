@@ -228,6 +228,10 @@ func NewServer(dbPath string, opts ...ServerOption) *Server {
 	return s
 }
 
+var (
+	pathPattern = regexp.MustCompile(`[/\\][\w._\-]+`)
+)
+
 //sanitizeErr sanitizes error messages for 500 status responses.
 // It removes internal details like file paths, SQL keywords, and
 // SQLite error patterns that should not be exposed to clients.
@@ -258,7 +262,6 @@ func sanitizeErr(err error) string {
 	// Strip path-like content instead of blanket-redacting the whole message.
 	// This preserves meaningful error text while removing internal paths like
 	// "/home/user/collection.anki2".
-	pathPattern := regexp.MustCompile(`[/\\][\w._\-]+`)
 	sanitized := pathPattern.ReplaceAllString(msg, "")
 	sanitized = strings.TrimSpace(sanitized)
 
@@ -288,8 +291,8 @@ func jsonResponse(w http.ResponseWriter, v interface{}) {
 func (s *Server) withMode(mode collection.OpenMode, fn func(col *collection.Collection, w http.ResponseWriter, r *http.Request)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if mode == collection.ReadWrite {
-			s.writeMu.RLock()
-			defer s.writeMu.RUnlock()
+			s.writeMu.Lock()
+			defer s.writeMu.Unlock()
 		}
 		col, err := collection.Open(s.dbPath, mode)
 		if err != nil {
