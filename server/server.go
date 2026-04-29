@@ -213,10 +213,12 @@ type Server struct {
 	rateLimit     int // requests per minute per IP; 0 = disabled
 	closeCh       chan struct{}
 	limiter       *rateLimiter
-	// NOTE: syncMu and writeMu are server-wide locks. In multi-collection mode, a sync/write
-	// to collection-A blocks sync/writes to collection-B. This is a known simplification —
-	// per-collection locks could be added later for better throughput under concurrent access.
-	syncMu        stdsync.Mutex   // Serializes concurrent sync operations (download/upload).
+	// syncMu serializes sync operations in single-collection mode only.
+	// In multi-collection mode, per-collection locks in CollectionRegistry handle
+	// sync serialization per collection, but writeMu remains server-wide so cross-collection syncs still serialize.
+	// writeMu remains server-wide — it protects dbPath from concurrent write handlers
+	// regardless of collection mode.
+	syncMu        stdsync.Mutex   // Serializes sync operations (single-collection mode only).
 	writeMu       stdsync.RWMutex // Protects dbPath from concurrent write handlers and sync. Both acquire exclusive Lock.
 	serverMu      stdsync.Mutex   // Protects httpServer field from concurrent access
 	httpServer    *http.Server    // Stored for graceful shutdown in Close()
@@ -319,6 +321,27 @@ func (s *Server) dbPathFromContext(r *http.Request) string {
 func collectionNameFromContext(r *http.Request) string {
 	v, _ := r.Context().Value(collectionNameContextKey).(string)
 	return v
+}
+
+// lockForCollection acquires either a per-collection lock (multi-collection mode)
+// or the global syncMu lock (single-collection mode) for the sync handler.
+// This serializes sync ops on the same collection; note that writeMu remains
+// server-wide and further serializes across all collections.
+func (s *Server) lockForCollection(r *http.Request) {
+	if name := collectionNameFromContext(r); name != "" && s.registry != nil {
+		s.registry.LockCollection(name)
+	} else {
+		s.syncMu.Lock()
+	}
+}
+
+// unlockForCollection releases the lock acquired by lockForCollection.
+func (s *Server) unlockForCollection(r *http.Request) {
+	if name := collectionNameFromContext(r); name != "" && s.registry != nil {
+		s.registry.UnlockCollection(name)
+	} else {
+		s.syncMu.Unlock()
+	}
 }
 
 // addCollection adds a "collection" key to a response map when in multi-collection mode.
@@ -819,8 +842,9 @@ func (s *Server) deltaSyncClient() (*sync.DeltaSyncClient, error) {
 
 // handleSyncDownload performs a full download from AnkiWeb.
 func (s *Server) handleSyncDownload(w http.ResponseWriter, r *http.Request) {
-	s.syncMu.Lock()
-	defer s.syncMu.Unlock()
+	// Use per-collection lock in multi-collection mode (serialized per-collection; writeMu is still server-wide)
+	s.lockForCollection(r)
+	defer s.unlockForCollection(r)
 
 	// Block write handlers from opening the DB while sync replaces the file
 	s.writeMu.Lock()
@@ -875,8 +899,9 @@ func (s *Server) handleSyncDownload(w http.ResponseWriter, r *http.Request) {
 
 // handleSyncUpload performs a full upload to AnkiWeb.
 func (s *Server) handleSyncUpload(w http.ResponseWriter, r *http.Request) {
-	s.syncMu.Lock()
-	defer s.syncMu.Unlock()
+	// Use per-collection lock in multi-collection mode (serialized per-collection; writeMu is still server-wide)
+	s.lockForCollection(r)
+	defer s.unlockForCollection(r)
 
 	// Block write handlers from opening the DB while sync reads it
 	s.writeMu.Lock()
@@ -912,8 +937,9 @@ func (s *Server) handleSyncUpload(w http.ResponseWriter, r *http.Request) {
 
 // handleSyncDelta performs an incremental delta sync with AnkiWeb.
 func (s *Server) handleSyncDelta(w http.ResponseWriter, r *http.Request) {
-	s.syncMu.Lock()
-	defer s.syncMu.Unlock()
+	// Use per-collection lock in multi-collection mode (serialized per-collection; writeMu is still server-wide)
+	s.lockForCollection(r)
+	defer s.unlockForCollection(r)
 
 	// Block write handlers from opening the DB while sync operates
 	s.writeMu.Lock()

@@ -6,18 +6,23 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	stdsync "sync"
 )
 
 // validNameRE matches collection names containing only alphanumeric chars, hyphens, and underscores.
 var validNameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
 
 // CollectionRegistry maps collection names to .anki2 file paths.
+// It also provides per-collection mutexes for concurrent sync isolation.
+// Each registered collection gets its own lock, allocated at construction time.
 type CollectionRegistry struct {
 	collections map[string]string
+	locks       map[string]*stdsync.Mutex
 }
 
 // NewCollectionRegistry creates a CollectionRegistry from a name→path map.
 // All paths are validated to exist and be non-empty at construction time.
+// Per-collection mutexes are pre-allocated for every known name.
 func NewCollectionRegistry(collections map[string]string) (*CollectionRegistry, error) {
 	if len(collections) == 0 {
 		return nil, fmt.Errorf("collections map cannot be empty")
@@ -38,10 +43,15 @@ func NewCollectionRegistry(collections map[string]string) (*CollectionRegistry, 
 		}
 	}
 	cp := make(map[string]string, len(collections))
+	locks := make(map[string]*stdsync.Mutex, len(collections))
 	for k, v := range collections {
 		cp[k] = v
+		locks[k] = &stdsync.Mutex{}
 	}
-	return &CollectionRegistry{collections: cp}, nil
+	return &CollectionRegistry{
+		collections: cp,
+		locks:       locks,
+	}, nil
 }
 
 // ParseCollections parses "name:path,name:path,..." into a name→path map.
@@ -88,4 +98,18 @@ func (r *CollectionRegistry) Names() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// LockCollection acquires the per-collection mutex for the given collection name.
+// In multi-collection mode, this allows concurrent sync operations on different
+// collections while serializing sync operations on the same collection.
+// Panics if name is not a registered collection.
+func (r *CollectionRegistry) LockCollection(name string) {
+	r.locks[name].Lock()
+}
+
+// UnlockCollection releases the per-collection mutex for the given collection name.
+// Panics if name is not a registered collection (mismatch with LockCollection is a bug).
+func (r *CollectionRegistry) UnlockCollection(name string) {
+	r.locks[name].Unlock()
 }
