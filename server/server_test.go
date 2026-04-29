@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -530,7 +531,8 @@ func TestSyncDeltaHandler(t *testing.T) {
 	// Create a test collection DB
 	dbPath := createTestDB(t)
 
-	var sessionKey string
+	var sessionKey atomic.Value
+	sessionKey.Store("")
 
 	// Mock AnkiWeb delta sync server
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -539,17 +541,17 @@ func TestSyncDeltaHandler(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"key":"handler-mock-key"}`))
-			sessionKey = "handler-mock-key"
+			sessionKey.Store("handler-mock-key")
 		case "/sync/start":
-			if r.URL.Query().Get("k") != sessionKey {
-				t.Errorf("expected session key %q, got %q", sessionKey, r.URL.Query().Get("k"))
+			if r.URL.Query().Get("k") != sessionKey.Load().(string) {
+				t.Errorf("expected session key %q, got %q", sessionKey.Load().(string), r.URL.Query().Get("k"))
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"data":{"scm":1700000000,"usn":0,"hostNum":0}}`))
 		case "/sync/applyChanges":
-			if r.URL.Query().Get("k") != sessionKey {
-				t.Errorf("expected session key %q", sessionKey, r.URL.Query().Get("k"))
+			if r.URL.Query().Get("k") != sessionKey.Load().(string) {
+				t.Errorf("expected session key %q, got %q", sessionKey.Load().(string), r.URL.Query().Get("k"))
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
@@ -609,7 +611,7 @@ func TestSyncDeltaHandler(t *testing.T) {
 	}
 
 	// Verify the mock server was actually hit (sessionKey should be set)
-	if sessionKey != "handler-mock-key" {
+	if sessionKey.Load().(string) != "handler-mock-key" {
 		t.Error("mock server was not called")
 	}
 }
