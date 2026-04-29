@@ -800,6 +800,23 @@ func (s *Server) handleAddNote(col *collection.Collection, w http.ResponseWriter
 	jsonResponse(w, addCollection(r, map[string]interface{}{"note_id": noteID}))
 }
 
+// syncClient creates a sync client from the server's sync config, using a
+// custom base URL if SyncURL is set in the config.
+func (s *Server) syncClient() (*sync.Client, error) {
+	if s.syncConfig.SyncURL != "" {
+		return sync.NewClientWithURL(*s.syncConfig, s.syncConfig.SyncURL)
+	}
+	return sync.NewClient(*s.syncConfig)
+}
+
+// deltaSyncClient creates a delta sync client from the server's sync config.
+func (s *Server) deltaSyncClient() (*sync.DeltaSyncClient, error) {
+	if s.syncConfig.SyncURL != "" {
+		return sync.NewDeltaClientWithURL(*s.syncConfig, s.syncConfig.SyncURL)
+	}
+	return sync.NewDeltaClient(*s.syncConfig)
+}
+
 // handleSyncDownload performs a full download from AnkiWeb.
 func (s *Server) handleSyncDownload(w http.ResponseWriter, r *http.Request) {
 	s.syncMu.Lock()
@@ -816,7 +833,7 @@ func (s *Server) handleSyncDownload(w http.ResponseWriter, r *http.Request) {
 
 	dbPath := s.dbPathFromContext(r)
 
-	client, err := sync.NewClient(*s.syncConfig)
+	client, err := s.syncClient()
 	if err != nil {
 		log.Printf("create sync client: %v", err)
 		errorResponse(w, http.StatusInternalServerError, "sync client initialization failed")
@@ -872,7 +889,7 @@ func (s *Server) handleSyncUpload(w http.ResponseWriter, r *http.Request) {
 
 	dbPath := s.dbPathFromContext(r)
 
-	client, err := sync.NewClient(*s.syncConfig)
+	client, err := s.syncClient()
 	if err != nil {
 		log.Printf("create sync client: %v", err)
 		errorResponse(w, http.StatusInternalServerError, "sync client initialization failed")
@@ -909,7 +926,7 @@ func (s *Server) handleSyncDelta(w http.ResponseWriter, r *http.Request) {
 
 	dbPath := s.dbPathFromContext(r)
 
-	client, err := sync.NewDeltaClient(*s.syncConfig)
+	client, err := s.deltaSyncClient()
 	if err != nil {
 		log.Printf("create delta sync client: %v", err)
 		errorResponse(w, http.StatusInternalServerError, "sync client initialization failed")

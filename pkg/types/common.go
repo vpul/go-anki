@@ -106,10 +106,11 @@ type Stats struct {
 	TotalReviews int `json:"total_reviews"` // From revlog
 }
 
-// SyncConfig holds AnkiWeb sync credentials.
+// SyncConfig holds AnkiWeb sync credentials and optional server URL.
 type SyncConfig struct {
 	Username string `json:"username"`
 	Password string `json:"-"`
+	SyncURL  string `json:"sync_url,omitempty"` // Optional: custom AnkiWeb sync URL (for testing/local sync servers)
 }
 
 // SyncMeta holds metadata returned by AnkiWeb sync handshake.
