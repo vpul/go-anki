@@ -16,16 +16,16 @@ import (
 // validateDeckName checks that a deck name is valid.
 func validateDeckName(name string) error {
 	if name == "" {
-		return fmt.Errorf("invalid deck name: must not be empty")
+		return &goanki.ValidationError{Msg: "invalid deck name: must not be empty"}
 	}
 	if len(name) > 500 {
-		return fmt.Errorf("invalid deck name: exceeds 500 characters")
+		return &goanki.ValidationError{Msg: "invalid deck name: exceeds 500 characters"}
 	}
 	if strings.ContainsRune(name, 0) {
-		return fmt.Errorf("invalid deck name: contains null byte")
+		return &goanki.ValidationError{Msg: "invalid deck name: contains null byte"}
 	}
 	if strings.ContainsRune(name, '\n') {
-		return fmt.Errorf("invalid deck name: contains newline")
+		return &goanki.ValidationError{Msg: "invalid deck name: contains newline"}
 	}
 	return nil
 }
@@ -311,7 +311,7 @@ func (c *Collection) AddNote(input goanki.NewNote) (int64, error) {
 		}
 	}
 	if model == nil {
-		return 0, fmt.Errorf("model %q not found", input.ModelName)
+		return 0, &goanki.ValidationError{Msg: fmt.Sprintf("model %q not found", input.ModelName)}
 	}
 
 	// Start a transaction for atomicity

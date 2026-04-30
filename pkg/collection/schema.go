@@ -116,7 +116,7 @@ func (c *Collection) getModelsV18() (map[int64]goanki.Model, error) {
 	models := make(map[int64]goanki.Model)
 
 	// Query notetypes (by ID to avoid unicase collation issues on name)
-	rows, err := c.db.Query("SELECT id, name, mtime_secs, usn FROM notetypes")
+	rows, err := c.db.Query("SELECT id, name, mtime_secs, usn, config FROM notetypes")
 	if err != nil {
 		return nil, fmt.Errorf("query notetypes table: %w", err)
 	}
@@ -126,7 +126,8 @@ func (c *Collection) getModelsV18() (map[int64]goanki.Model, error) {
 	for rows.Next() {
 		var m goanki.Model
 		var mtime int64
-		if err := rows.Scan(&m.ID, &m.Name, &mtime, &m.USN); err != nil {
+		var config []byte
+		if err := rows.Scan(&m.ID, &m.Name, &mtime, &m.USN, &config); err != nil {
 			return nil, fmt.Errorf("scan notetype: %w", err)
 		}
 		m.Mod = mtime
@@ -137,6 +138,9 @@ func (c *Collection) getModelsV18() (map[int64]goanki.Model, error) {
 		m.LatexPre = ""
 		m.LatexPost = ""
 		m.LatexSVG = 0
+
+		// Parse notetype config in the initial query — eliminates N+1
+		m = parseNotetypeConfig(config, m)
 
 		models[m.ID] = m
 		modelIDs = append(modelIDs, m.ID)
@@ -159,6 +163,7 @@ func (c *Collection) getModelsV18() (map[int64]goanki.Model, error) {
 		if err != nil {
 			log.Printf("warning: failed to query fields: %v", err)
 		} else {
+			defer func() { _ = fieldRows.Close() }()
 			for fieldRows.Next() {
 				var ntid int64
 				var ord int
@@ -175,7 +180,6 @@ func (c *Collection) getModelsV18() (map[int64]goanki.Model, error) {
 			if err := fieldRows.Err(); err != nil {
 				log.Printf("warning: iterate fields: %v", err)
 			}
-			_ = fieldRows.Close()
 		}
 	}
 
@@ -193,6 +197,7 @@ func (c *Collection) getModelsV18() (map[int64]goanki.Model, error) {
 		if err != nil {
 			log.Printf("warning: failed to query templates: %v", err)
 		} else {
+			defer func() { _ = tmplRows.Close() }()
 			for tmplRows.Next() {
 				var ntid int64
 				var ord int
@@ -213,19 +218,11 @@ func (c *Collection) getModelsV18() (map[int64]goanki.Model, error) {
 			if err := tmplRows.Err(); err != nil {
 				log.Printf("warning: iterate templates: %v", err)
 			}
-			_ = tmplRows.Close()
 		}
 	}
 
-	// For each model, query notetype config and assign batched fields/templates
+	// Assign batched fields and templates to each model (config already parsed above)
 	for _, mid := range modelIDs {
-		// Parse notetype config for CSS, sort field, and type info
-		var ntConfig []byte
-		err = c.db.QueryRow("SELECT config FROM notetypes WHERE id = ?", mid).Scan(&ntConfig)
-		if err == nil && len(ntConfig) > 0 {
-			models[mid] = parseNotetypeConfig(ntConfig, models[mid])
-		}
-
 		m := models[mid]
 		m.Fields = fieldsByModel[mid]
 		m.Templates = templatesByModel[mid]

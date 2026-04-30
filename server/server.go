@@ -776,8 +776,9 @@ func (s *Server) handleCreateDeck(col *collection.Collection, w http.ResponseWri
 
 	deckID, err := col.CreateDeck(req.Name)
 	if err != nil {
-		if strings.HasPrefix(err.Error(), "invalid") {
-			errorResponse(w, http.StatusBadRequest, err.Error())
+		var ve *goanki.ValidationError
+		if errors.As(err, &ve) {
+			errorResponse(w, http.StatusBadRequest, ve.Error())
 		} else {
 			errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 		}
@@ -825,8 +826,9 @@ func (s *Server) handleAddNote(col *collection.Collection, w http.ResponseWriter
 
 	noteID, err := col.AddNote(input)
 	if err != nil {
-		if strings.HasPrefix(err.Error(), "invalid") {
-			errorResponse(w, http.StatusBadRequest, err.Error())
+		var ve *goanki.ValidationError
+		if errors.As(err, &ve) {
+			errorResponse(w, http.StatusBadRequest, ve.Error())
 		} else {
 			errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
 		}

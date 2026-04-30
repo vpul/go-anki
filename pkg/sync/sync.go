@@ -466,24 +466,22 @@ func validateURL(u string) error {
 	return nil
 }
 
-var privateRanges = []struct {
-	network *net.IPNet
-}{
-	{mustParseCIDR("10.0.0.0/8")},
-	{mustParseCIDR("172.16.0.0/12")},
-	{mustParseCIDR("192.168.0.0/16")},
-	{mustParseCIDR("169.254.0.0/16")},
-	{mustParseCIDR("127.0.0.0/8")},
-	{mustParseCIDR("0.0.0.0/32")},
-	{mustParseCIDR("::1/128")},
-	{mustParseCIDR("fc00::/7")},  // IPv6 ULA (RFC 4193)
-	{mustParseCIDR("fe80::/10")}, // IPv6 link-local
+var privateRanges = []*net.IPNet{
+	mustParseCIDR("10.0.0.0/8"),
+	mustParseCIDR("172.16.0.0/12"),
+	mustParseCIDR("192.168.0.0/16"),
+	mustParseCIDR("169.254.0.0/16"),
+	mustParseCIDR("127.0.0.0/8"),
+	mustParseCIDR("0.0.0.0/32"),
+	mustParseCIDR("::1/128"),
+	mustParseCIDR("fc00::/7"),  // IPv6 ULA (RFC 4193)
+	mustParseCIDR("fe80::/10"), // IPv6 link-local
 }
 
 // isPrivateIP checks whether an IP address is in a private or reserved range.
 func isPrivateIP(ip net.IP) bool {
 	for _, r := range privateRanges {
-		if r.network.Contains(ip) {
+		if r.Contains(ip) {
 			return true
 		}
 	}
