@@ -2,6 +2,9 @@ package types
 
 import "time"
 
+// Version is the go-anki version string.
+const Version = "go-anki/1.0.0"
+
 // Rating represents a review answer choice (maps to Anki's ease values).
 type Rating int
 

@@ -629,7 +629,7 @@ func (s *Server) Close() error {
 
 // handleVersion returns the server version.
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
-	resp := map[string]interface{}{"version": "go-anki/1.0.0"}
+	resp := map[string]interface{}{"version": goanki.Version}
 	jsonResponse(w, addCollection(r, resp))
 }
 
@@ -776,7 +776,11 @@ func (s *Server) handleCreateDeck(col *collection.Collection, w http.ResponseWri
 
 	deckID, err := col.CreateDeck(req.Name)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
+		if strings.HasPrefix(err.Error(), "invalid") {
+			errorResponse(w, http.StatusBadRequest, err.Error())
+		} else {
+			errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
+		}
 		return
 	}
 	jsonResponse(w, addCollection(r, map[string]interface{}{"deck_id": deckID}))
@@ -821,7 +825,11 @@ func (s *Server) handleAddNote(col *collection.Collection, w http.ResponseWriter
 
 	noteID, err := col.AddNote(input)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
+		if strings.HasPrefix(err.Error(), "invalid") {
+			errorResponse(w, http.StatusBadRequest, err.Error())
+		} else {
+			errorResponse(w, http.StatusInternalServerError, sanitizeErr(err))
+		}
 		return
 	}
 	jsonResponse(w, addCollection(r, map[string]interface{}{"note_id": noteID}))
@@ -1047,12 +1055,23 @@ func (s *Server) handleGetMedia(w http.ResponseWriter, r *http.Request) {
 		errorResponse(w, http.StatusBadRequest, "invalid filename")
 		return
 	}
-	// Check file exists before serving, so we can return a JSON error
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		errorResponse(w, http.StatusNotFound, "media file not found")
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			errorResponse(w, http.StatusNotFound, "media file not found")
+		} else {
+			errorResponse(w, http.StatusInternalServerError, "failed to open media file")
+		}
 		return
 	}
-	http.ServeFile(w, r, path)
+	defer func() { _ = f.Close() }()
+
+	fi, err := f.Stat()
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to stat media file")
+		return
+	}
+	http.ServeContent(w, r, filename, fi.ModTime(), f)
 }
 
 // handleUploadMedia uploads a media file. The body is the raw file content.

@@ -59,10 +59,10 @@ func (c *Collection) isV18Plus() bool {
 }
 
 // getDecksV18 reads decks from the separate decks table (v18+ schema).
-func (c *Collection) getDecksV18() (map[int64]goanki.Deck, error) {
+func getDecksV18WithDB(db dbOrTx) (map[int64]goanki.Deck, error) {
 	decks := make(map[int64]goanki.Deck)
 	// Single query: fetch id, name, mtime, usn, and kind (for filtered deck detection)
-	rows, err := c.db.Query("SELECT id, name, mtime_secs, usn, kind FROM decks")
+	rows, err := db.Query("SELECT id, name, mtime_secs, usn, kind FROM decks")
 	if err != nil {
 		return nil, fmt.Errorf("query decks table: %w", err)
 	}
@@ -145,69 +145,80 @@ func (c *Collection) getModelsV18() (map[int64]goanki.Model, error) {
 		return nil, fmt.Errorf("iterate notetypes: %w", err)
 	}
 
-	// For each model, query fields, templates, and notetype config
-	for _, mid := range modelIDs {
-		// Query fields
-		fieldRows, err := c.db.Query("SELECT ntid, ord, name FROM fields WHERE ntid = ? ORDER BY ord", mid)
+	// Batch-load fields for all models in a single query
+	fieldsByModel := make(map[int64][]goanki.ModelField)
+	if len(modelIDs) > 0 {
+		placeholders := make([]string, len(modelIDs))
+		args := make([]any, len(modelIDs))
+		for i, id := range modelIDs {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		query := "SELECT ntid, ord, name FROM fields WHERE ntid IN (" + strings.Join(placeholders, ",") + ") ORDER BY ntid, ord"
+		fieldRows, err := c.db.Query(query, args...)
 		if err != nil {
-			// Log warning but continue - fields are optional for basic operations
-			log.Printf("warning: failed to query fields for model %d: %v", mid, err)
-			continue
-		}
-		var fields []goanki.ModelField
-		for fieldRows.Next() {
-			var ntid int64
-			var ord int
-			var name string
-			if err := fieldRows.Scan(&ntid, &ord, &name); err != nil {
-				_ = fieldRows.Close()
-				log.Printf("warning: failed to scan field for model %d: %v", mid, err)
-				continue
+			log.Printf("warning: failed to query fields: %v", err)
+		} else {
+			for fieldRows.Next() {
+				var ntid int64
+				var ord int
+				var name string
+				if err := fieldRows.Scan(&ntid, &ord, &name); err != nil {
+					log.Printf("warning: failed to scan field: %v", err)
+					continue
+				}
+				fieldsByModel[ntid] = append(fieldsByModel[ntid], goanki.ModelField{
+					Name: name,
+					ORD:  ord,
+				})
 			}
-			fields = append(fields, goanki.ModelField{
-				Name: name,
-				ORD:  ord,
-			})
-		}
-		if err := fieldRows.Err(); err != nil {
+			if err := fieldRows.Err(); err != nil {
+				log.Printf("warning: iterate fields: %v", err)
+			}
 			_ = fieldRows.Close()
-			log.Printf("warning: iterate fields for model %d: %v", mid, err)
-			continue
 		}
-		_ = fieldRows.Close()
+	}
 
-		// Query templates
-		tmplRows, err := c.db.Query("SELECT ntid, ord, name, config FROM templates WHERE ntid = ? ORDER BY ord", mid)
+	// Batch-load templates for all models in a single query
+	templatesByModel := make(map[int64][]goanki.ModelTemplate)
+	if len(modelIDs) > 0 {
+		placeholders := make([]string, len(modelIDs))
+		args := make([]any, len(modelIDs))
+		for i, id := range modelIDs {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		query := "SELECT ntid, ord, name, config FROM templates WHERE ntid IN (" + strings.Join(placeholders, ",") + ") ORDER BY ntid, ord"
+		tmplRows, err := c.db.Query(query, args...)
 		if err != nil {
-			// Templates are needed for card rendering
-			log.Printf("warning: failed to query templates for model %d: %v", mid, err)
-			continue
-		}
-		var templates []goanki.ModelTemplate
-		for tmplRows.Next() {
-			var ntid int64
-			var ord int
-			var name string
-			var config []byte
-			if err := tmplRows.Scan(&ntid, &ord, &name, &config); err != nil {
-				log.Printf("warning: failed to scan template for model %d: %v", mid, err)
-				continue
+			log.Printf("warning: failed to query templates: %v", err)
+		} else {
+			for tmplRows.Next() {
+				var ntid int64
+				var ord int
+				var name string
+				var config []byte
+				if err := tmplRows.Scan(&ntid, &ord, &name, &config); err != nil {
+					log.Printf("warning: failed to scan template: %v", err)
+					continue
+				}
+				qfmt, afmt := parseTemplateConfig(config)
+				templatesByModel[ntid] = append(templatesByModel[ntid], goanki.ModelTemplate{
+					Name: name,
+					ORD:  ord,
+					QFmt: qfmt,
+					AFmt: afmt,
+				})
 			}
-			qfmt, afmt := parseTemplateConfig(config)
-			templates = append(templates, goanki.ModelTemplate{
-				Name: name,
-				ORD:  ord,
-				QFmt: qfmt,
-				AFmt: afmt,
-			})
-		}
-		if err := tmplRows.Err(); err != nil {
+			if err := tmplRows.Err(); err != nil {
+				log.Printf("warning: iterate templates: %v", err)
+			}
 			_ = tmplRows.Close()
-			log.Printf("warning: iterate templates for model %d: %v", mid, err)
-			continue
 		}
-		_ = tmplRows.Close()
+	}
 
+	// For each model, query notetype config and assign batched fields/templates
+	for _, mid := range modelIDs {
 		// Parse notetype config for CSS, sort field, and type info
 		var ntConfig []byte
 		err = c.db.QueryRow("SELECT config FROM notetypes WHERE id = ?", mid).Scan(&ntConfig)
@@ -216,8 +227,8 @@ func (c *Collection) getModelsV18() (map[int64]goanki.Model, error) {
 		}
 
 		m := models[mid]
-		m.Fields = fields
-		m.Templates = templates
+		m.Fields = fieldsByModel[mid]
+		m.Templates = templatesByModel[mid]
 		models[mid] = m
 	}
 

@@ -2,6 +2,7 @@ package collection
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
@@ -195,11 +196,21 @@ func (c *Collection) CreateDeck(name string) (int64, error) {
 // createDeckUnlocked is the internal implementation of CreateDeck without locking.
 // It must be called with c.mu held, or from a context that already ensures serialization.
 func (c *Collection) createDeckUnlocked(name string) (int64, error) {
+	return c.createDeckUnlockedTx(nil, name)
+}
+
+// createDeckUnlockedTx is like createDeckUnlocked but operates within an optional transaction.
+func (c *Collection) createDeckUnlockedTx(tx *sql.Tx, name string) (int64, error) {
 	if err := validateDeckName(name); err != nil {
 		return 0, err
 	}
 
-	decks, err := c.GetDecks()
+	var db dbOrTx = c.db
+	if tx != nil {
+		db = tx
+	}
+
+	decks, err := c.getDecksWithDB(db)
 	if err != nil {
 		return 0, fmt.Errorf("get decks: %w", err)
 	}
@@ -225,7 +236,7 @@ func (c *Collection) createDeckUnlocked(name string) (int64, error) {
 		commonBlob := []byte{0x08, 0x01, 0x10, 0x01} // study_mode=1, new_cards_order=1
 		kindBlob := []byte{0x0a, 0x02, 0x08, 0x01}   // regular deck
 
-		_, err = c.db.Exec(
+		_, err = db.Exec(
 			"INSERT INTO decks (id, name, mtime_secs, usn, common, kind) VALUES (?, ?, ?, ?, ?, ?)",
 			id, name, now, -1, commonBlob, kindBlob,
 		)
@@ -237,7 +248,7 @@ func (c *Collection) createDeckUnlocked(name string) (int64, error) {
 		// Default deck config: minimal protobuf
 		configID := id
 		configBlob := []byte{} // Minimal config, Anki will fill defaults
-		_, err = c.db.Exec(
+		_, err = db.Exec(
 			"INSERT OR IGNORE INTO deck_config (id, name, mtime_secs, usn, config) VALUES (?, ?, ?, ?, ?)",
 			configID, name, now, -1, configBlob,
 		)
@@ -266,7 +277,7 @@ func (c *Collection) createDeckUnlocked(name string) (int64, error) {
 			return 0, fmt.Errorf("serialize decks: %w", err)
 		}
 
-		_, err = c.db.Exec("UPDATE col SET decks = ?, mod = ?, usn = -1", string(decksJSON), now)
+		_, err = db.Exec("UPDATE col SET decks = ?, mod = ?, usn = -1", string(decksJSON), now)
 		if err != nil {
 			return 0, fmt.Errorf("update decks in col: %w", err)
 		}
@@ -303,18 +314,18 @@ func (c *Collection) AddNote(input goanki.NewNote) (int64, error) {
 		return 0, fmt.Errorf("model %q not found", input.ModelName)
 	}
 
-	// Find or create the deck (use unlocked version to avoid deadlock)
-	deckID, err := c.createDeckUnlocked(input.DeckName)
-	if err != nil {
-		return 0, fmt.Errorf("create/get deck: %w", err)
-	}
-
 	// Start a transaction for atomicity
 	tx, err := c.db.Begin()
 	if err != nil {
 		return 0, fmt.Errorf("begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	// Find or create the deck inside the transaction
+	deckID, err := c.createDeckUnlockedTx(tx, input.DeckName)
+	if err != nil {
+		return 0, fmt.Errorf("create/get deck: %w", err)
+	}
 
 	now := time.Now().Unix()
 	noteRand, err := randInt(1000)
