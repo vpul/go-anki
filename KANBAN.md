@@ -40,6 +40,7 @@
 | Per-collection locks | OpenCode | `fix/per-collection-locks` | [#23](https://github.com/vpul/go-anki/pull/23) | ✅ Merged |
 | Server delta sync test | Claude Code | `test/delta-server-test` | [#24](https://github.com/vpul/go-anki/pull/24) | ✅ Merged |
 | Audit round 26 (5 bugs) | Claude Code review | `fix/audit-round26` | [#26](https://github.com/vpul/go-anki/pull/26) | ✅ Merged |
+| Audit round 27 (labeled break) | Parallel QA review | `fix/audit-round27` | [#27](https://github.com/vpul/go-anki/pull/27) | ✅ Merged |
 
 ### What's Deferred (Future)
 - Nothing — all features complete
