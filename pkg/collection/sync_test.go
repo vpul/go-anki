@@ -145,7 +145,7 @@ func TestAddGrave(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Error("expected grave for oid=1001 type=1 in GetChanges")
+		t.Error("expected grave for oid=1001 type=0 in GetChanges")
 	}
 }
 
