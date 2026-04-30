@@ -125,7 +125,7 @@ type SyncMeta struct {
 // Grave represents a deletion record in the graves table.
 type Grave struct {
 	OID  int64 `json:"oid"`  // Object ID
-	Type int8  `json:"type"` // Object type (1=card, 2=note, 3=deck)
+	Type int8  `json:"type"` // Object type (0=card, 1=note, 2=deck)
 	USN  int   `json:"usn"`  // Update sequence number
 }
 

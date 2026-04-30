@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -59,14 +60,14 @@ func Open(path string, mode OpenMode) (*Collection, error) {
 	var dsn string
 	switch mode {
 	case ReadOnly:
-		dsn = fmt.Sprintf("file:%s?mode=ro", path)
+		dsn = fmt.Sprintf("file:%s?mode=ro", url.PathEscape(path))
 	case ReadWrite:
 		// Use mode=rw (not rwc) so that a missing file produces a clear error
 		// instead of silently creating an empty database with no Anki tables.
 		// Add busy_timeout for concurrent access safety.
-		dsn = fmt.Sprintf("file:%s?mode=rw&_busy_timeout=5000", path)
+		dsn = fmt.Sprintf("file:%s?mode=rw&_busy_timeout=5000", url.PathEscape(path))
 	default:
-		dsn = fmt.Sprintf("file:%s?mode=ro", path)
+		dsn = fmt.Sprintf("file:%s?mode=ro", url.PathEscape(path))
 	}
 
 	db, err := sql.Open("sqlite", dsn)

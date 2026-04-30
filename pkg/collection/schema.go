@@ -232,6 +232,7 @@ const maxProtobufFieldLen = 10 << 20 // 10MB max per protobuf length-delimited f
 //   - field 1: qfmt (string)
 //   - field 2: afmt (string)
 func parseTemplateConfig(data []byte) (qfmt, afmt string) {
+parseLoop:
 	for len(data) > 0 {
 		tag, n := decodeVarint(data)
 		if n <= 0 {
@@ -245,7 +246,7 @@ func parseTemplateConfig(data []byte) (qfmt, afmt string) {
 		case 0: // varint
 			_, n = decodeVarint(data)
 			if n <= 0 {
-				break
+				break parseLoop
 			}
 			data = data[n:]
 		case 1: // fixed64
@@ -256,7 +257,7 @@ func parseTemplateConfig(data []byte) (qfmt, afmt string) {
 		case 2: // length-delimited
 			length, n := decodeVarint(data)
 			if n <= 0 || length > uint64(len(data[n:])) || length > uint64(maxProtobufFieldLen) {
-				break
+				break parseLoop
 			}
 			data = data[n:]
 			value := string(data[:length])
