@@ -291,6 +291,7 @@ parseLoop:
 //   - field 5: latex_pre (string)
 //   - field 6: latex_post (string)
 func parseNotetypeConfig(data []byte, m goanki.Model) goanki.Model {
+parseLoop:
 	for len(data) > 0 {
 		tag, n := decodeVarint(data)
 		if n <= 0 {
@@ -304,7 +305,7 @@ func parseNotetypeConfig(data []byte, m goanki.Model) goanki.Model {
 		case 0: // varint
 			val, n := decodeVarint(data)
 			if n <= 0 {
-				break
+				break parseLoop
 			}
 			data = data[n:]
 			switch fieldNum {
@@ -323,7 +324,7 @@ func parseNotetypeConfig(data []byte, m goanki.Model) goanki.Model {
 		case 2: // length-delimited
 			length, n := decodeVarint(data)
 			if n <= 0 || length > uint64(len(data[n:])) || length > uint64(maxProtobufFieldLen) {
-				break
+				break parseLoop
 			}
 			data = data[n:]
 			value := string(data[:length])
