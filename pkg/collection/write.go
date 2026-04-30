@@ -36,31 +36,31 @@ func validateNote(note goanki.NewNote) error {
 	hasContent := false
 	for _, v := range note.Fields {
 		if len(v) > 100000 {
-			return fmt.Errorf("invalid note: field exceeds 100000 characters")
+			return &goanki.ValidationError{Msg: "invalid note: field exceeds 100000 characters"}
 		}
 		if strings.ContainsRune(v, 0) {
-			return fmt.Errorf("invalid note: field contains null byte")
+			return &goanki.ValidationError{Msg: "invalid note: field contains null byte"}
 		}
 		if v != "" {
 			hasContent = true
 		}
 	}
 	if !hasContent {
-		return fmt.Errorf("invalid note: at least one field must have content")
+		return &goanki.ValidationError{Msg: "invalid note: at least one field must have content"}
 	}
 	// Validate tags
 	if len(note.Tags) > 100 {
-		return fmt.Errorf("invalid note: too many tags (%d, max 100)", len(note.Tags))
+		return &goanki.ValidationError{Msg: fmt.Sprintf("invalid note: too many tags (%d, max 100)", len(note.Tags))}
 	}
 	for _, tag := range note.Tags {
 		if len(tag) > 100 {
-			return fmt.Errorf("invalid note: tag %q exceeds 100 characters", tag)
+			return &goanki.ValidationError{Msg: fmt.Sprintf("invalid note: tag %q exceeds 100 characters", tag)}
 		}
 		if strings.ContainsRune(tag, 0) {
-			return fmt.Errorf("invalid note: tag contains null byte")
+			return &goanki.ValidationError{Msg: "invalid note: tag contains null byte"}
 		}
 		if strings.ContainsAny(tag, " \t\r\n") {
-			return fmt.Errorf("invalid note: tag %q contains whitespace", tag)
+			return &goanki.ValidationError{Msg: fmt.Sprintf("invalid note: tag %q contains whitespace", tag)}
 		}
 	}
 	return nil
