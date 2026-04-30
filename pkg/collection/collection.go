@@ -30,6 +30,13 @@ type Collection struct {
 	mu     sync.Mutex // protects write operations for concurrent access
 }
 
+// dbOrTx matches the methods of *sql.DB and *sql.Tx that we use.
+type dbOrTx interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
 // OpenMode controls database access mode.
 type OpenMode int
 
@@ -118,11 +125,15 @@ func (c *Collection) DB() *sql.DB {
 
 // GetDecks returns all decks in the collection.
 func (c *Collection) GetDecks() (map[int64]goanki.Deck, error) {
+	return c.getDecksWithDB(c.db)
+}
+
+func (c *Collection) getDecksWithDB(db dbOrTx) (map[int64]goanki.Deck, error) {
 	if c.isV18Plus() {
-		return c.getDecksV18()
+		return getDecksV18WithDB(db)
 	}
 	var decksJSON string
-	err := c.db.QueryRow("SELECT decks FROM col").Scan(&decksJSON)
+	err := db.QueryRow("SELECT decks FROM col").Scan(&decksJSON)
 	if err != nil {
 		return nil, fmt.Errorf("query decks: %w", err)
 	}

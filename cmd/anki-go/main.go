@@ -40,7 +40,7 @@ func main() {
 	case "serve":
 		exitCode = runCmd(runServe)
 	case "version":
-		fmt.Println("go-anki/1.0.0")
+		fmt.Println(goanki.Version)
 	case "help", "--help", "-h":
 		printUsage()
 	default:
@@ -479,7 +479,6 @@ func runSyncDelta() error {
 	// Count cards before sync
 	col, openErr := collection.Open(*db, collection.ReadOnly)
 	cardsBefore := 0
-	usnBefore := 0
 	if openErr == nil {
 		stats, statsErr := col.GetStats()
 		if statsErr == nil {
@@ -503,7 +502,7 @@ func runSyncDelta() error {
 		_ = col.Close()
 	}
 
-	fmt.Printf("Delta sync complete: cards before=%d after=%d usn_before=%d\n", cardsBefore, cardsAfter, usnBefore)
+	fmt.Printf("Delta sync complete: cards before=%d after=%d\n", cardsBefore, cardsAfter)
 	return nil
 }
 

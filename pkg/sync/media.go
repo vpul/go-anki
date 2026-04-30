@@ -3,9 +3,11 @@ package sync
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -160,9 +162,12 @@ func (c *Client) MediaDownload(ctx context.Context, info *MediaSyncInfo, filenam
 
 	files := make(map[string][]byte, len(result))
 	for name, b64 := range result {
-		// AnkiWeb returns base64-encoded file contents
-		// For now store as-is — caller can decode if needed
-		files[name] = []byte(b64)
+		decoded, err := base64.StdEncoding.DecodeString(b64)
+		if err != nil {
+			log.Printf("warning: failed to decode base64 for %s: %v", name, err)
+			continue
+		}
+		files[name] = decoded
 	}
 
 	return files, nil

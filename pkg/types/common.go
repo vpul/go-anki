@@ -2,6 +2,15 @@ package types
 
 import "time"
 
+// Version is the go-anki version string.
+const Version = "go-anki/1.0.0"
+
+// ValidationError is a sentinel error type for client-side validation errors.
+// Use errors.As(err, &ve) to distinguish 400 (validation) from 500 (internal).
+type ValidationError struct{ Msg string }
+
+func (e *ValidationError) Error() string { return e.Msg }
+
 // Rating represents a review answer choice (maps to Anki's ease values).
 type Rating int
 
