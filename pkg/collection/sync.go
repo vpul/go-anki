@@ -366,12 +366,12 @@ func (c *Collection) applyDeckChangeV11(ctx context.Context, tx *sql.Tx, deck go
 // applyGrave deletes an object and removes its grave record.
 func (c *Collection) applyGrave(ctx context.Context, tx *sql.Tx, grave goanki.Grave) error {
 	switch grave.Type {
-	case 1: // Card
+	case 0: // Card
 		_, err := tx.ExecContext(ctx, "DELETE FROM cards WHERE id = ?", grave.OID)
 		if err != nil {
 			return fmt.Errorf("delete card %d from grave: %w", grave.OID, err)
 		}
-	case 2: // Note
+	case 1: // Note
 		_, err := tx.ExecContext(ctx, "DELETE FROM notes WHERE id = ?", grave.OID)
 		if err != nil {
 			return fmt.Errorf("delete note %d from grave: %w", grave.OID, err)
@@ -381,7 +381,7 @@ func (c *Collection) applyGrave(ctx context.Context, tx *sql.Tx, grave goanki.Gr
 		if err != nil {
 			return fmt.Errorf("delete cards for note %d from grave: %w", grave.OID, err)
 		}
-	case 3: // Deck
+	case 2: // Deck
 		if c.isV18Plus() {
 			_, err := tx.ExecContext(ctx, "DELETE FROM decks WHERE id = ?", grave.OID)
 			if err != nil {

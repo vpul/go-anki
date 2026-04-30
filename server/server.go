@@ -516,7 +516,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 			}
 			col, err := collection.Open(path, collection.ReadOnly)
 			if err != nil {
-				_ = col.Close()
+				// col is nil on error — no close needed
 				errorResponse(w, http.StatusServiceUnavailable, "database unavailable")
 				return
 			}
@@ -1073,20 +1073,33 @@ func (s *Server) handleUploadMedia(w http.ResponseWriter, r *http.Request) {
 		errorResponse(w, http.StatusBadRequest, "invalid filename")
 		return
 	}
-	dst, err := os.Create(path)
+	// Write to a temp file first, then atomically rename to prevent
+	// partial writes on failure (e.g. connection drops mid-upload).
+	tmpPath := path + ".tmp." + strconv.FormatInt(time.Now().UnixNano(), 36)
+	dst, err := os.Create(tmpPath)
 	if err != nil {
 		errorResponse(w, http.StatusInternalServerError, "create media file")
 		return
 	}
 	defer func() { _ = dst.Close() }()
 	if _, err := io.Copy(dst, r.Body); err != nil {
-		_ = os.Remove(path)
+		_ = os.Remove(tmpPath)
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {
 			errorResponse(w, http.StatusRequestEntityTooLarge, "file too large")
 		} else {
 			errorResponse(w, http.StatusInternalServerError, "write media file")
 		}
+		return
+	}
+	if err := dst.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		errorResponse(w, http.StatusInternalServerError, "finalize media file")
+		return
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		errorResponse(w, http.StatusInternalServerError, "commit media file")
 		return
 	}
 	jsonResponse(w, addCollection(r, map[string]interface{}{"status": "ok", "filename": filename}))

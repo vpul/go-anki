@@ -117,7 +117,7 @@ func TestAddGrave(t *testing.T) {
 	defer func() { _ = col.Close() }()
 
 	// Add a grave record for a card
-	err := col.AddGrave(context.Background(), 1001, 1) // type 1 = card
+	err := col.AddGrave(context.Background(), 1001, 0) // type 0 = card
 	if err != nil {
 		t.Fatalf("AddGrave: %v", err)
 	}
@@ -139,13 +139,13 @@ func TestAddGrave(t *testing.T) {
 	}
 	found := false
 	for _, g := range delta.Graves {
-		if g.OID == 1001 && g.Type == 1 {
+		if g.OID == 1001 && g.Type == 0 {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Error("expected grave for oid=1001 type=1 in GetChanges")
+		t.Error("expected grave for oid=1001 type=0 in GetChanges")
 	}
 }
 
@@ -255,7 +255,7 @@ func TestApplyChangesGraveDeletesCard(t *testing.T) {
 	// Apply a grave that deletes this card
 	delta := &goanki.SyncDelta{
 		Graves: []goanki.Grave{
-			{OID: cardID, Type: 1, USN: 70},
+			{OID: cardID, Type: 0, USN: 70},
 		},
 		USN: 70,
 	}
